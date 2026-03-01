@@ -1,0 +1,10 @@
+{
+  "steps": 2000,
+  "seed": 12345,
+  "runs": 2,
+  "emitEvents": true,
+  "outputDir": "out/exp1",
+  "seeds": [12345, 12346],
+  "seedRangeStart": 200,
+  "seedRangeEnd": 202
+}

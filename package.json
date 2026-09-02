@@ -1,0 +1,20 @@
+{
+  "name": "dt-monorepo",
+  "private": true,
+  "workspaces": [
+    "packages/engine",
+    "packages/api",
+    "packages/dashboard"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces",
+    "build:engine": "npm run build -w packages/engine",
+    "build:api": "npm run build -w packages/api",
+    "build:dashboard": "npm run build -w packages/dashboard",
+    "dev:api": "npm run build:engine && npm run dev -w packages/api",
+    "dev:dashboard": "npm run build:engine && npm run dev -w packages/dashboard"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

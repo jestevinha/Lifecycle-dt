@@ -1,8 +1,20 @@
-# Build output (compiled artifacts are not source of record)
-bin/
-out/
-*.class
+node_modules/
+dist/
+.env
+.DS_Store
+coverage/
+*.tsbuildinfo
 
-# IDE / local tooling
+# IDE / local agent settings
 .idea/
 .claude/
+
+# Databases are ignored by default, but the experiment record is the
+# primary research artifact and IS tracked deliberately.
+*.db
+*.sqlite
+!packages/api/dt.sqlite
+
+# SQLite sidecars are transient; dt.sqlite is checkpointed before commit.
+*.sqlite-wal
+*.sqlite-shm

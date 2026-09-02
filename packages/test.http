@@ -1,0 +1,23 @@
+### Create experiment
+POST http://localhost:3001/api/experiments
+Content-Type: application/json
+
+{
+  "simSteps": 200,
+  "simSeed": 42,
+  "totalEpisodes": 30,
+  "agents": [
+    { "type": "mab",       "hyperparams": { "epsilon": 0.3 } },
+    { "type": "linucb",    "hyperparams": { "alpha": 0.5 } },
+    { "type": "qlearning", "hyperparams": { "alpha": 0.1, "gamma": 0.95, "epsilon": 0.3 } }
+  ]
+}
+
+### Start experiment
+POST http://localhost:3001/api/experiments/5/start
+
+### Get experiment
+GET http://localhost:3001/api/experiments/5
+
+### Get episodes
+GET http://localhost:3001/api/experiments/runs/1/episodes

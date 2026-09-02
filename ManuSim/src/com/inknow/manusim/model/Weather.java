@@ -14,14 +14,19 @@ import com.inknow.manusim.control.Const;
 public abstract class Weather {
 
 	private static Random rand = new Random();
-	
+
+	/** Seed the weather RNG for reproducible temperature noise. */
+	public static void setSeed(long seed) {
+		rand.setSeed(seed);
+	}
+
 	public static double getAmbTemp(DayTime dayTime) {
 		return Math.cos( 2 * Math.PI * ( dayTime.getDayMinute() - ( Const.AMB_TEMPERATURE_PEAK_HH * 60) ) / ( 24 * 60 ) ) * Const.TEMP_AMB_AMP 
 						+ Const.TEMP_AMB_AVG + Const.RANDOM_TEMPERATURE * rand.nextGaussian();
 	}
 	
 	public static String getAmbTempString(double ambTemp) {
-		DecimalFormat fmt = new DecimalFormat("0 ºC");
+		DecimalFormat fmt = new DecimalFormat("0 \u00BAC");
 		return fmt.format( Math.round( ambTemp ) );
 	}
 	

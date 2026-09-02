@@ -4,11 +4,14 @@ import com.inknow.manusim.model.ContextModel;
 import com.inknow.manusim.model.PlantModel;
 import com.inknow.manusim.model.SimulationEvent;
 import com.inknow.manusim.model.SimulationEventListener;
+import com.inknow.manusim.model.Weather;
 
+import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -29,6 +32,9 @@ import java.util.List;
 public class HeadlessMain {
 
     public static void main(String[] args) {
+        // Diagnostic: confirm which safety rate model is active at runtime
+        System.err.println("SAFETY_MODEL_INDEX=" + Const.ACTOR_SAFETY_RATE_MODEL_INDEX);
+
         // Defaults
         int steps = 1000;
         Long baseSeed = null; // if null, ContextModel default seed is used
@@ -36,6 +42,9 @@ public class HeadlessMain {
         boolean emitEvents = false;
         String outputDir = "out";
         String configPath = null;
+        double setpointRate = 0.0;
+        boolean interactive = false;
+        double wearRateSpread = 0.0;
         List<Long> explicitSeeds = new ArrayList<Long>();
         long rangeStart = Long.MIN_VALUE, rangeEnd = Long.MIN_VALUE;
 
@@ -63,6 +72,13 @@ public class HeadlessMain {
                 emitEvents = Boolean.parseBoolean(args[++i]);
             } else if ("--outputDir".equals(a) && i + 1 < args.length) {
                 outputDir = args[++i];
+            } else if ("--setpointRate".equals(a) && i + 1 < args.length) {
+                setpointRate = Double.parseDouble(args[++i]);
+            } else if ("--interactive".equals(a)) {
+                interactive = true;
+            } else if ("--wearRateSpread".equals(a) && i + 1 < args.length) {
+                wearRateSpread = Double.parseDouble(args[++i]);
+                wearRateSpread = Math.min(Math.max(wearRateSpread, 0.0), 1.0); // clamp [0,1]
             } else if ("--config".equals(a) && i + 1 < args.length) {
                 configPath = args[++i];
             }
@@ -109,6 +125,153 @@ public class HeadlessMain {
             runSeeds.add(baseSeed != null ? baseSeed : Long.MIN_VALUE); // Long.MIN_VALUE => use default seed
         }
 
+        // ── Interactive mode: single run, stdin→rate, stdout→JSONL ──
+        if (interactive) {
+            Long seed = runSeeds.get(0);
+            if (seed != Long.MIN_VALUE) Weather.setSeed(seed);
+            ContextModel context = (seed == Long.MIN_VALUE ? new ContextModel(null) : new ContextModel(null, seed));
+            PlantModel plant = new PlantModel(null);
+
+            // Reseed Unit B accident RNGs from the episode seed so accident counts vary
+            // per episode. Without this, each Unit B uses its construction-time seed
+            // (id × workareaId) — a fixed value — making accident draws byte-identical
+            // across every episode and producing quasi-discrete frozen rewards.
+            // XOR constant 0xFEEDBEEFCAFEL keeps this RNG stream distinct from both
+            // the wear-rate RNG (0x5DEECE66DL) and Weather (seeded directly).
+            {
+                long accSeedBase = (seed == Long.MIN_VALUE ? 0L : seed);
+                java.util.Random accidentRng = new java.util.Random(accSeedBase ^ 0xFEEDBEEFCAFEL);
+                for (int wa = 0; wa < plant.getWorkareas().size(); wa++) {
+                    plant.getWorkareas().get(wa).getUnitB().setUnitRandomSeed(accidentRng.nextLong());
+                }
+                System.err.println("[accidentRng] 16 Unit B RNGs reseeded from episodeSeed=" + accSeedBase);
+            }
+
+            // Per-workarea wear-rate heterogeneity (B.2).
+            // When wearRateSpread > 0, each workarea's Unit C gets m_i = 1 + U(-S, +S)
+            // where S = wearRateSpread, seeded deterministically from (episodeSeed, wa).
+            // This is set once per episode; the OFF path (spread=0) leaves all multipliers
+            // at their Unit default of 1.0, reproducing lockstep exactly.
+            if (wearRateSpread > 0.0) {
+                // One RNG per episode seeded from the episode seed; draw 16 sequential
+                // values so each workarea gets a distinct multiplier.  Sequential draws
+                // from a single LCG are well-distributed; this avoids the correlated-
+                // first-value problem that arises from constructing 16 separate Random
+                // objects from consecutive seeds (42*31+0, 42*31+1, …).
+                long episodeSeed = (seed == Long.MIN_VALUE ? 0L : seed);
+                // XOR-derived seed keeps the wear RNG's initial state clearly distinct
+                // from the Weather/ContextModel RNG even when they share the same episode
+                // seed. Both are separate Random instances, so they never interfere, but
+                // the XOR makes the independence explicit and auditable.
+                java.util.Random episodeRng = new java.util.Random(episodeSeed ^ 0x5DEECE66DL);
+                System.err.println("[wearRateSpread=" + String.format(Locale.US, "%.3f", wearRateSpread) + "] multipliers:");
+                for (int wa = 0; wa < plant.getWorkareas().size(); wa++) {
+                    double m = 1.0 + (episodeRng.nextDouble() * 2.0 - 1.0) * wearRateSpread;
+                    plant.getWorkareas().get(wa).getUnitC().setWearRateMultiplier(m);
+                    System.err.println("  wa" + wa + " m=" + String.format(Locale.US, "%.4f", m));
+                }
+            }
+
+            BufferedReader stdinReader = new BufferedReader(new InputStreamReader(System.in));
+
+            // Preventive-maintenance downtime: when MAINT fires on a workarea it is
+            // held OFFLINE (STATUS_MAINTENANCE, rate 0, zero production) for one full
+            // shift, then returns to STATUS_ON. This gives maintenance a real
+            // production cost instead of the previous one-step wear-reset hack.
+            int stepsPerShift = Math.max(1, Const.SHIFTTIME_MINUTES / Const.TS_SIM_MINUTES);
+            int[] maintCountdown = new int[plant.getWorkareas().size()];
+
+            try {
+                for (int step = 0; step < steps; step++) {
+                    // 1. Read command from stdin
+                    //    Format: "rate" or "rate MAINT waIndex"
+                    //    MAINT triggers preventive maintenance (wear reset) on workarea[waIndex]
+                    String line;
+                    try {
+                        line = stdinReader.readLine();
+                    } catch (IOException e) {
+                        break; // pipe closed
+                    }
+                    if (line == null) break; // EOF
+
+                    double rate;
+                    int maintIdx = -1; // -1 = no maintenance
+
+                    String trimmed = line.trim();
+                    if (trimmed.contains("MAINT")) {
+                        String[] parts = trimmed.split("\\s+");
+                        try {
+                            rate = Double.parseDouble(parts[0]);
+                            // Find MAINT keyword and the workarea index after it
+                            for (int p = 0; p < parts.length - 1; p++) {
+                                if ("MAINT".equals(parts[p])) {
+                                    maintIdx = Integer.parseInt(parts[p + 1]);
+                                    break;
+                                }
+                            }
+                        } catch (Exception e) {
+                            System.err.println("[HeadlessMain] Invalid MAINT command: " + line);
+                            break;
+                        }
+                    } else {
+                        try {
+                            rate = Double.parseDouble(trimmed);
+                        } catch (NumberFormatException e) {
+                            System.err.println("[HeadlessMain] Invalid rate on stdin: " + line);
+                            break;
+                        }
+                    }
+
+                    // 2. Handle preventive maintenance: reset wear and take the
+                    //    target workarea offline for a full shift (STATUS_MAINTENANCE).
+                    if (maintIdx >= 0 && maintIdx < plant.getWorkareas().size()) {
+                        plant.getWorkareas().get(maintIdx).getUnitC().setWearStatus(0.0);
+                        plant.getWorkareas().get(maintIdx).setStatus(Const.STATUS_MAINTENANCE);
+                        maintCountdown[maintIdx] = stepsPerShift;
+                    }
+
+                    // 3. Apply rate to all workareas EXCEPT those currently under
+                    //    maintenance, which are held offline (rate 0) until their
+                    //    shift-long countdown elapses.
+                    plant.setSetPointRate(rate);
+                    for (int wa = 0; wa < plant.getWorkareas().size(); wa++) {
+                        if (maintCountdown[wa] > 0) {
+                            plant.getWorkareas().get(wa).setCurrRate(0.0);
+                        } else {
+                            plant.getWorkareas().get(wa).setCurrRate(rate);
+                        }
+                    }
+
+                    // 4. Simulate one step
+                    try { plant.setCurrentStepForEvents(step); } catch (Throwable ignored) {}
+                    context.simulateStep();
+                    plant.simulateStep(context);
+
+                    // 4b. Tick down maintenance timers; bring finished workareas back
+                    //     online. Done after the step so a freshly-maintained workarea
+                    //     stays offline for the full stepsPerShift count.
+                    for (int wa = 0; wa < maintCountdown.length; wa++) {
+                        if (maintCountdown[wa] > 0) {
+                            maintCountdown[wa]--;
+                            if (maintCountdown[wa] == 0) {
+                                plant.getWorkareas().get(wa).setStatus(Const.STATUS_ON);
+                            }
+                        }
+                    }
+
+                    // 5. Write JSONL with wearByWorkarea to stdout and flush
+                    String json = jsonLineInteractive(step, context, plant);
+                    System.out.println(json);
+                    System.out.flush();
+                }
+            } catch (Exception e) {
+                // Graceful exit on any pipe/IO error
+            }
+            return; // exit after interactive run
+        }
+
+        // ── Batch mode (unchanged) ──
+
         // Prepare per-experiment folder with ISO-like, filesystem-safe timestamp
         DateTimeFormatter expFmt = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH-mm-ss");
         String expStamp = LocalDateTime.now().format(expFmt);
@@ -123,8 +286,25 @@ public class HeadlessMain {
             ensureParentDir(kpiPath);
 
             // Create context and plant models for each run
+            if (seed != Long.MIN_VALUE) Weather.setSeed(seed);
             ContextModel context = (seed == Long.MIN_VALUE ? new ContextModel(null) : new ContextModel(null, seed));
             PlantModel plant = new PlantModel(null);
+
+            // Reseed Unit B accident RNGs — same derivation as interactive mode.
+            {
+                long accSeedBase = (seed == Long.MIN_VALUE ? 0L : seed);
+                java.util.Random accidentRng = new java.util.Random(accSeedBase ^ 0xFEEDBEEFCAFEL);
+                for (int wa = 0; wa < plant.getWorkareas().size(); wa++) {
+                    plant.getWorkareas().get(wa).getUnitB().setUnitRandomSeed(accidentRng.nextLong());
+                }
+            }
+
+            if (setpointRate > 0.0) {
+                plant.setSetPointRate(setpointRate);
+                for (int wa = 0; wa < plant.getWorkareas().size(); wa++) {
+                    plant.getWorkareas().get(wa).setCurrRate(setpointRate);
+                }
+            }
 
             BufferedWriter evWriter = null;
             SimulationEventListener listener = null;
@@ -236,6 +416,42 @@ public class HeadlessMain {
         kv(sb, "productEnergy", round(plant.getProductEnergy(), 6)).append(',');
         kv(sb, "productCost", round(plant.getProductCost(), 6)).append(',');
         kv(sb, "numberAccidents", plant.getNumberAccidents());
+        sb.append('}');
+        return sb.toString();
+    }
+
+    private static String jsonLineInteractive(int step, com.inknow.manusim.model.ContextModel ctx, com.inknow.manusim.model.PlantModel plant) {
+        Locale.setDefault(Locale.US);
+        String clock = String.format("%02d:%02d", ctx.getClockMinutes().getHour(), ctx.getClockMinutes().getMinute());
+
+        StringBuilder sb = new StringBuilder(512);
+        sb.append('{');
+        kv(sb, "step", step).append(',');
+        kv(sb, "auditDay", ctx.getAuditDay()).append(',');
+        kv(sb, "weekDay", ctx.getWeekDay()).append(',');
+        kvStr(sb, "clock", clock).append(',');
+        kv(sb, "ambTemperature", round(ctx.getAmbTemperature(), 4)).append(',');
+        kv(sb, "rawMaterialQuality", round(ctx.getRawMaterialQuality(), 4)).append(',');
+
+        kv(sb, "currPower", round(plant.getCurrPower(), 6)).append(',');
+        kv(sb, "totalRate", round(plant.getTotalRate(), 6)).append(',');
+        kv(sb, "setpointRate", round(plant.getSetpointRate(), 6)).append(',');
+        kv(sb, "cumProduction", round(plant.getCumProduction(), 6)).append(',');
+        kv(sb, "cumEnergy", round(plant.getCumEnergy(), 6)).append(',');
+        kv(sb, "cumCost", round(plant.getCumCost(), 6)).append(',');
+        kv(sb, "productEnergy", round(plant.getProductEnergy(), 6)).append(',');
+        kv(sb, "productCost", round(plant.getProductCost(), 6)).append(',');
+        kv(sb, "numberAccidents", plant.getNumberAccidents()).append(',');
+
+        // wearByWorkarea: unitC wear for each of the 16 workareas
+        sb.append("\"wearByWorkarea\":[");
+        for (int i = 0; i < plant.getWorkareas().size(); i++) {
+            if (i > 0) sb.append(',');
+            double wear = round(plant.getWorkareas().get(i).getUnitC().getWearStatus(), 2);
+            sb.append(String.format(Locale.US, "%f", wear));
+        }
+        sb.append(']');
+
         sb.append('}');
         return sb.toString();
     }

@@ -157,7 +157,7 @@ public class Workarea {
 	
  public void registAccident(int event_type ) {
         this.numberAccidents++;
-        if ( Const.APP_DATABASE_ON ) {
+        if ( Const.APP_DATABASE_ON && this.parent != null && this.parent.getParent() != null ) {
             long timestamp = this.parent.getParent().getContextModel().getAuditDay() * 24 * 60 + this.parent.getParent().getContextModel().getClockMinutes().getDayMinute();
             DBIO.registerEvent( timestamp, event_type, this.id, this.currActor.getId(), this.currRate, this.getParent().getCurrShiftTimeMinutes() );
         }

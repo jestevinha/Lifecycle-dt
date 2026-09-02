@@ -22,6 +22,7 @@ public class Unit {
 	private int workareaId;
 	//
 	private Random unitRandom;
+	private static int sftyRateThrLogged = 0;  // diagnostic counter (remove after validation)
 	//
 	private double powerMax;
 	// state
@@ -46,7 +47,10 @@ public class Unit {
 	
 	private double wearStatus;
 	private double maintenanceTime;
-	
+	// Per-workarea wear-rate multiplier (default 1.0 = no heterogeneity).
+	// Set once per episode via HeadlessMain when --wearRateSpread > 0.
+	private double wearRateMultiplier = 1.0;
+
 	// constructors
 	
 	public Unit() {
@@ -108,12 +112,15 @@ public class Unit {
 		this.safetyExpertiseCurve = new ExponentialModel();
 		this.safetyLightCurve = new ExponentialModel();
 		this.safetyShifttimeCurve = new ExponentialModel();
+		this.safetyRateCurve = new ExponentialModel();
 		// Type C
 		this.efficiencyTemperatureCurve = new ParabolicModel();
 		this.wearRawCurve = new ParabolicModel();
 		this.wearExpertiseCurve = new ExponentialModel();
 		//
-		this.wearStatus = this.unitRandom.nextDouble() * Const.NO_PARTS_WEAR_BREAKDOWN; // randomize initial wear with position
+		this.wearStatus = Const.INITIAL_WEAR_RANDOM
+				? this.unitRandom.nextDouble() * Const.NO_PARTS_WEAR_BREAKDOWN
+				: 0.0;
 		this.maintenanceTime = 0.0;
 	}
 	
@@ -157,6 +164,13 @@ public class Unit {
 			double  sftyLightThr = this.safetyLightCurve.computeOutputFramed( lightLevel, Const.SFTY_LIGHT_MIN_LIGHT, 1.0, Const.SFTY_LIGHT_MIN_SFTY, 1.0 );
 			double  sftyShiftThr = this.safetyShifttimeCurve.computeOutputFramed( shifttime_normed, Const.SFTY_SHIFT_MIN_SHIFT, 1.0, Const.SFTY_SHIFT_MIN_SFTY, 1.0 );
 			double  sftyRateThr = this.safetyRateCurve.computeOutputFramed( currRate, Const.SFTY_RATE_MIN_RATE, 1.0, Const.SFTY_RATE_MIN_SFTY, 1.0 );
+			// Diagnostic: print threshold once per run to confirm model is active
+			if (sftyRateThrLogged < 2) {
+				System.err.println("DIAG sftyRateThr=" + String.format("%.4f", sftyRateThr)
+					+ " rate=" + String.format("%.2f", currRate)
+					+ " expFactor=" + String.format("%.4f", this.safetyRateCurve.getExpFactor()));
+				sftyRateThrLogged++;
+			}
 //			if ( this.getNextGaussian() > sftyExpThr ) { // M06H
 //				this.parent.setStatus( Const.STATUS_ACCIDENT );
 //				currActor.setStatus( Const.STATUS_ACCIDENT );
@@ -231,7 +245,8 @@ public class Unit {
 					/ this.efficiencyTemperatureCurve.computeOutput( temperature );						// M03C
 			// wear & maintenance
 			double expertiseSimilarity = this.technology.similarity( currActor.getExpertise() );
-			this.wearStatus += this.powerRateCurve.computeOutput( currRate ) * Const.TS_SIM_MINUTES 	// M01A/M04C (friction effect)
+			this.wearStatus += this.wearRateMultiplier
+					* this.powerRateCurve.computeOutput( currRate ) * Const.TS_SIM_MINUTES 				// M01A/M04C (friction effect)
 					/ this.wearRawCurve.computeOutput( rawMaterialQuality )								// M02C
 					/ this.wearExpertiseCurve.computeOutput( expertiseSimilarity );						// M05C
 			if ( this.wearStatus >= Const.NO_PARTS_WEAR_BREAKDOWN ) {
@@ -464,6 +479,19 @@ public class Unit {
 	public void setWearStatus(double wearStatus) {
 		this.wearStatus = wearStatus;
 		return;
+	}
+
+	public void setWearRateMultiplier(double m) {
+		this.wearRateMultiplier = m;
+	}
+
+	public double getWearRateMultiplier() {
+		return this.wearRateMultiplier;
+	}
+
+	/** Reseed the unit accident RNG from the episode seed so draws vary per episode. */
+	public void setUnitRandomSeed(long seed) {
+		this.unitRandom.setSeed(seed);
 	}
 
 	public void setMaintenanceTime(double maintenanceTime) {

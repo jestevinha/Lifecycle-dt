@@ -32,7 +32,7 @@ public class Actor {
 	
 	public Actor(int id, String name, int workLocationIndex){
 		this.id = id;
-		this.name = name;		
+		this.name = name;
 		this.locationIndex = workLocationIndex;
 		switch (this.name.charAt(0)) {
 		case 'A':
@@ -52,6 +52,7 @@ public class Actor {
 			break;
 		}
 		this.status = Const.STATUS_ON;
+		this.expertise = new Expertise();
 	}
 	
 	// other methods

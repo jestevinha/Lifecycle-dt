@@ -279,7 +279,7 @@ public class PlantPanel extends javax.swing.JPanel implements ChangeListener, Ac
         this.skyRight.add( this.totalEnergyLabel );
         // --
         y += Const.PLANT_PANEL_TOTAL_DISPLAY_GAP + Const.PLANT_PANEL_TOTAL_DISPLAY_HEIGHT;
-        this.totalCostLabel = new JLabel( "0.00 €", SwingConstants.RIGHT );
+        this.totalCostLabel = new JLabel( "0.00 \u20AC", SwingConstants.RIGHT );
         this.totalCostLabel.setBounds( 40, y, Const.PLANT_PANEL_TOTAL_DISPLAY_WIDTH, Const.PLANT_PANEL_TOTAL_DISPLAY_HEIGHT  );
         this.totalCostLabel.setOpaque( false );
         this.totalCostLabel.setForeground( ColorLevel.getDisplaySky( new DayTime( 0 ) ) );
@@ -295,7 +295,7 @@ public class PlantPanel extends javax.swing.JPanel implements ChangeListener, Ac
         this.skyRight.add( this.productEnergyLabel );
         //
         y += Const.PLANT_PANEL_TOTAL_DISPLAY_GAP + Const.PLANT_PANEL_TOTAL_DISPLAY_HEIGHT;
-        this.productCostLabel = new JLabel("0.00 €/u", SwingConstants.RIGHT);
+        this.productCostLabel = new JLabel("0.00 \u20AC/u", SwingConstants.RIGHT);
         this.productCostLabel.setBounds(40, y, Const.PLANT_PANEL_TOTAL_DISPLAY_WIDTH, Const.PLANT_PANEL_TOTAL_DISPLAY_HEIGHT );
         this.productCostLabel.setOpaque(false);
         this.productCostLabel.setForeground( ColorLevel.getDisplaySky(new DayTime(0)) );
@@ -311,7 +311,7 @@ public class PlantPanel extends javax.swing.JPanel implements ChangeListener, Ac
         this.skyRight.add( this.numberAccidentsLabel );
         
         // WEATHER DISPLAY
-        this.ambTempLabel = new JLabel( "10 ºC", SwingConstants.CENTER );
+        this.ambTempLabel = new JLabel( "10 \u00BAC", SwingConstants.CENTER );
         this.ambTempLabel.setBounds( 5, 10, 250, Const.PLANT_PANEL_TOTAL_DISPLAY_HEIGHT + 10 );
         this.ambTempLabel.setOpaque( false );
         this.ambTempLabel.setForeground( ColorLevel.getDisplaySky( new DayTime( 0 ) ) );

@@ -1,0 +1,8 @@
+# Build output (compiled artifacts are not source of record)
+bin/
+out/
+*.class
+
+# IDE / local tooling
+.idea/
+.claude/

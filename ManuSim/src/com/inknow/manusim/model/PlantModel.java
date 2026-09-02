@@ -148,20 +148,18 @@ public class PlantModel {
 			this.numberAccidents += this.workareas.get(i).getNumberAccidents();
 		}		
 		//		
+		this.cumProduction += this.totalRate * Const.TS_SIM_MINUTES;	// accumulated production [rate*min]
 		this.productEnergy = ( this.totalRate > 0 ? this.currPower / 1000 / this.totalRate : 0.0 );			// kWh/u
 		this.productCost = this.productEnergy * Const.EUR_KWH;			// EUR/u
 		this.cumEnergy += this.currPower * Const.TS_SIM_MINUTES / 60; 	// Wh
 		this.cumCost = this.cumEnergy * Const.EUR_KWH / 1000;			// EUR
-		// events: production completed delta (TODO: relies on reliable cumProduction updates)
+		// events: production completed delta
 		double prodDelta = this.cumProduction - this.lastCumProductionForEvents;
 		if (prodDelta > 0) {
-			ContextModel ctxForProd = (this.parent != null ? this.parent.getContextModel() : null);
-			if (ctxForProd != null) {
-				Map<String,Object> payload = new HashMap<String,Object>();
-				payload.put("quantity", prodDelta);
-				payload.put("step", this.currentStepForEvents);
-				fireEvent(new SimulationEvent("PRODUCTION_COMPLETED", makeTimestamp(ctxForProd), null, null, payload));
-			}
+			Map<String,Object> payload = new HashMap<String,Object>();
+			payload.put("quantity", prodDelta);
+			payload.put("step", this.currentStepForEvents);
+			fireEvent(new SimulationEvent("PRODUCTION_COMPLETED", makeTimestamp(contextModel), null, null, payload));
 			this.lastCumProductionForEvents = this.cumProduction;
 		}
 		// events: plant-level accident delta
@@ -621,11 +619,76 @@ public class PlantModel {
 		this.units.add( new Unit( 843, Const.UNIT_C2, 84 ) );
 		this.units.add( new Unit( 863, Const.UNIT_C3, 86 ) );
 		this.units.add( new Unit( 883, Const.UNIT_C1, 88 ) );
-		//
-		this.initUnitsTechnology();
-		this.updateUnitsCurveModels();
+		// Load curve models - use setup panel values when GUI available, defaults otherwise
+		if (this.parent != null) {
+			this.initUnitsTechnology();
+			this.updateUnitsCurveModels();
+		} else {
+			this.initHeadlessUnitModels();
+		}
 		//
 		return;
+	}
+
+	/** Initialises unit curve models with the same default values as SetupUnits/SetupActors
+	 *  when running headless (no GUI parent). Mirrors SetupUnits.defineStandardModels() defaults. */
+	private void initHeadlessUnitModels() {
+		// Default curve indices (from Const): UNIT_POWER_RATE_MODEL_INDEX=2, EFFICIENCY_RAW=0, etc.
+		// ParabolicModel(id, y00, y05): parA=2-4*y05+2*y00, parB=1-parA-y00, parC=y00
+		// ParabolicModel(id, y00)     : parA=4*(y00-1), parB=-parA, parC=y00
+		// ExponentialModel(id, wmin, GROWTH): amplitude=wmin, expFactor=-ln(wmin)
+
+		// powerRateCurve: index 2 => ParabolicModel(12, y00=0.0, y05=0.50) => f(x) = x
+		ParabolicModel dfltPowerRate = new ParabolicModel(12, 0.0, 0.50, "");
+		// efficiencyRaw / efficiencyTemperature: index 0 => ParabolicModel(20, y00=1.0) => f(x)=1.0
+		ParabolicModel dfltConcave = new ParabolicModel(20, 1.0, "");
+		// wearRaw: index 0 => ParabolicModel(30, y00=1.0) => f(x)=1.0
+		ParabolicModel dfltConvex = new ParabolicModel(30, 1.0, "");
+		// efficiencyExpertise: index 0 => ExponentialModel(40, 1.00, GROWTH) => f(x)=1.0
+		ExponentialModel dfltExpUp = new ExponentialModel(40, 1.00, Const.EXPONENTIAL_MODEL_GROWTH, "");
+		// wearExpertise: index 0 => ExponentialModel(50, 1.0, GROWTH) => f(x)=1.0
+		ExponentialModel dfltExpDwn = new ExponentialModel(50, 1.0, Const.EXPONENTIAL_MODEL_GROWTH, "");
+		// safety curves: exponentialUp/Decay index 0 => f(x)=1.0 for all
+		ExponentialModel dfltSftyExp   = new ExponentialModel(40, 1.00, Const.EXPONENTIAL_MODEL_GROWTH, "");
+		ExponentialModel dfltSftyLight = new ExponentialModel(40, 1.00, Const.EXPONENTIAL_MODEL_GROWTH, "");
+		ExponentialModel dfltSftyShift = new ExponentialModel(50, 1.00, Const.EXPONENTIAL_MODEL_DECAY, "");
+		// Safety rate curve: use the configured decay model index
+		// Index 0=1.00(flat), 1=0.80, 2=0.66, 3=0.50 — must match ACTOR_SAFETY_RATE_MODEL_INDEX
+		double[] safetyRateWmin = {1.00, 0.80, 0.66, 0.50};
+		double wmin = safetyRateWmin[Const.ACTOR_SAFETY_RATE_MODEL_INDEX];
+		ExponentialModel dfltSftyRate  = new ExponentialModel(50 + Const.ACTOR_SAFETY_RATE_MODEL_INDEX, wmin, Const.EXPONENTIAL_MODEL_DECAY, "");
+		// unit technology (expertise) by generation - mirrors SetupActors.defineStandardModels()
+		Expertise expType1 = new Expertise(5315, Const.EXPERT_TYPE1_M, Const.EXPERT_TYPE1_E, Const.EXPERT_TYPE1_I, Const.EXPERT_TYPE1_S);
+		Expertise expType2 = new Expertise(3534, Const.EXPERT_TYPE2_M, Const.EXPERT_TYPE2_E, Const.EXPERT_TYPE2_I, Const.EXPERT_TYPE2_S);
+		Expertise expType3 = new Expertise(1353, Const.EXPERT_TYPE3_M, Const.EXPERT_TYPE3_E, Const.EXPERT_TYPE3_I, Const.EXPERT_TYPE3_S);
+
+		for (int i = 0; i < this.units.size(); i++) {
+			Unit u = this.units.get(i);
+			int masterType = u.getType() / 10;
+			Expertise techExp;
+			switch (u.getType() % 10) {
+				case 1: techExp = expType1; break;
+				case 2: techExp = expType2; break;
+				case 3: techExp = expType3; break;
+				default: techExp = expType1; break;
+			}
+			u.setTechnology(techExp);
+			if (masterType == Const.UNIT_A) {
+				u.setPowerRateCurve(dfltPowerRate);
+				u.setEfficiencyRawCurve(dfltConcave);
+			} else if (masterType == Const.UNIT_B) {
+				u.setEfficiencyExpertiseCurve(dfltExpUp);
+				u.setSafetyExpertiseCurve(dfltSftyExp);
+				u.setSafetyLightCurve(dfltSftyLight);
+				u.setSafetyShifttimeCurve(dfltSftyShift);
+				u.setSafetyRateCurve(dfltSftyRate);
+			} else if (masterType == Const.UNIT_C) {
+				u.setEfficiencyTemperatureCurve(dfltConcave);
+				u.setPowerRateCurve(dfltPowerRate);
+				u.setWearRawCurve(dfltConvex);
+				u.setWearExpertiseCurve(dfltExpDwn);
+			}
+		}
 	}
 
 	private void installUnits2Workareas() {
@@ -714,10 +777,31 @@ public class PlantModel {
 		actors.add( new Actor( Const.ACTOR_TYPE_D + i++, "DJ", 12) );
 		actors.add( new Actor( Const.ACTOR_TYPE_D + i++, "DK", 37) );
 		actors.add( new Actor( Const.ACTOR_TYPE_D + i++, "DL", 11) );
-		//
-		this.updateExpertiseModels();
+		// Load expertise models - use setup panel values when GUI available, defaults otherwise
+		if (this.parent != null) {
+			this.updateExpertiseModels();
+		} else {
+			this.initHeadlessActorExpertise();
+		}
 		//--
 		return;
+	}
+
+	/** Initialises actor expertise with the same default values as SetupActors.defineStandardModels(). */
+	private void initHeadlessActorExpertise() {
+		Expertise expType0 = new Expertise(4345, Const.EXPERT_TYPE0_M, Const.EXPERT_TYPE0_E, Const.EXPERT_TYPE0_I, Const.EXPERT_TYPE0_S);
+		Expertise expType1 = new Expertise(5315, Const.EXPERT_TYPE1_M, Const.EXPERT_TYPE1_E, Const.EXPERT_TYPE1_I, Const.EXPERT_TYPE1_S);
+		Expertise expType2 = new Expertise(3534, Const.EXPERT_TYPE2_M, Const.EXPERT_TYPE2_E, Const.EXPERT_TYPE2_I, Const.EXPERT_TYPE2_S);
+		Expertise expType3 = new Expertise(1353, Const.EXPERT_TYPE3_M, Const.EXPERT_TYPE3_E, Const.EXPERT_TYPE3_I, Const.EXPERT_TYPE3_S);
+		for (int i = 0; i < this.actors.size(); i++) {
+			switch (this.actors.get(i).getType()) {
+				case Const.ACTOR_TYPE_A: this.actors.get(i).setExpertise(expType0); break;
+				case Const.ACTOR_TYPE_B: this.actors.get(i).setExpertise(expType1); break;
+				case Const.ACTOR_TYPE_C: this.actors.get(i).setExpertise(expType2); break;
+				case Const.ACTOR_TYPE_D: this.actors.get(i).setExpertise(expType3); break;
+				default: this.actors.get(i).setExpertise(expType0); break;
+			}
+		}
 	}
 	
 	private void installActors2Workareas() {

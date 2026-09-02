@@ -50,7 +50,7 @@ public class Const {
 	public static final int ACTOR_SAFETY_EXPERTISE_MODEL_INDEX = 0;
 	public static final int ACTOR_SAFETY_LIGHT_MODEL_INDEX = 0;
 	public static final int ACTOR_SAFETY_SHIFTTIME_MODEL_INDEX = 0;
-	public static final int ACTOR_SAFETY_RATE_MODEL_INDEX = 0;
+	public static final int ACTOR_SAFETY_RATE_MODEL_INDEX = 3;  // wmin=0.50: exp decay makes very_high riskier than medium
 	//
 	public static final double EXPERT_TYPE0_M = 4.0; 
 	public static final double EXPERT_TYPE0_E = 3.0; 
@@ -77,7 +77,11 @@ public class Const {
 	
 	// SIMULATOR CONSTANTS
 
-	public static final int TS_SIM_MINUTES = 10;
+	// Simulation time-step size in minutes. Default 60 (8 steps/shift).
+	// Override via -Dmanusim.tsSimMinutes=10 (48 steps/shift) for higher-resolution
+	// accident-trial dynamics during recalibration / Part A experiments.
+	public static final int TS_SIM_MINUTES =
+			Integer.parseInt(System.getProperty("manusim.tsSimMinutes", "60"));
 	//
 	public static final int TS_SIM_MS_MIN = 100;
 	public static final int TS_SIM_MS_MAX = 1000;
@@ -146,6 +150,12 @@ public class Const {
 	// WEAR & MAINTENANCE
 	public static final double NO_PARTS_WEAR_BREAKDOWN = 3 * 24 * 60 * RATE_FULL; // 10 days in optimal conditions full rate;
 	public static final double PERIOD_MAINTENANCE_MINUTES = 8 * 60.0; // 8 hours
+	// When true, each Unit's wear is initialised to a uniform random fraction of
+	// NO_PARTS_WEAR_BREAKDOWN (legacy behaviour). When false (default), wear starts
+	// at 0 so episodes begin in a known state — required for clean RL learning signal.
+	// May be overridden by system property -Dmanusim.initialWearRandom=true|false.
+	public static final boolean INITIAL_WEAR_RANDOM =
+			Boolean.parseBoolean(System.getProperty("manusim.initialWearRandom", "false"));
 	
 	// SAFETY PROBABILITY FRAMES
 	

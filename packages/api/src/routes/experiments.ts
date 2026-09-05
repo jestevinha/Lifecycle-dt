@@ -106,15 +106,23 @@ experimentsRouter.post("/", (req, res) => {
   res.status(201).json({ id: result.lastInsertRowid });
 });
 
-function createAgent(cfg: AgentConfig): Agent {
+/**
+ * `seed` (Known-Bugs-Fixed #12, fixed 2026-09-05): threads `config.simSeed`
+ * into MAB's and Q-Learning's ε-greedy exploration RNG so their behavior is
+ * reproducible given a seed, the same way the Java simulator and LinUCB
+ * (which has no RNG dependency) already are. Optional/undefined-safe: a
+ * caller that doesn't pass a seed keeps the prior unseeded (Math.random)
+ * behavior.
+ */
+function createAgent(cfg: AgentConfig, seed?: number): Agent {
   const h = cfg.hyperparams;
   switch (cfg.type) {
     case "mab":
-      return new MABAgent(h.epsilon, h.epsilonDecay, h.epsilonMin, !!h.useConstantAlpha, h.alpha ?? 0.1);
+      return new MABAgent(h.epsilon, h.epsilonDecay, h.epsilonMin, !!h.useConstantAlpha, h.alpha ?? 0.1, seed);
     case "linucb":
       return new LinUCBAgent(h.alpha);
     case "qlearning":
-      return new QLearningAgent(h.alpha, h.gamma, h.epsilon, h.epsilonDecay, h.epsilonMin);
+      return new QLearningAgent(h.alpha, h.gamma, h.epsilon, h.epsilonDecay, h.epsilonMin, seed);
   }
 }
 
@@ -206,7 +214,7 @@ export async function runExperiment(
   const updateRunReward = db.prepare("UPDATE runs SET final_reward = ? WHERE id = ?");
 
   for (const agentCfg of config.agents) {
-    const agent = createAgent(agentCfg);
+    const agent = createAgent(agentCfg, config.simSeed);
 
     const epsInfo = agent.getEpsilon?.() != null
       ? ` ε=${agent.getEpsilon!()},decay=${agent.getEpsilonDecay!()}`
@@ -325,7 +333,11 @@ export async function runExperiment(
             // Per-step reward with failure & wear penalties
             const accidentDelta = kpiStep.numberAccidents - prevAccidents;
             prevAccidents = kpiStep.numberAccidents;
-            const reward = computeStepReward(kpiStep, accidentDelta, prevWear);
+            // maintTarget: this shift's deliberate MAINT workarea (-1 if none),
+            // set by resolveCommand() below and in scope for every step of this
+            // shift — threading it here fixes Known-Bugs-Fixed #13 (a deliberate
+            // late-threshold maintenance reset no longer miscounts as a failure).
+            const reward = computeStepReward(kpiStep, accidentDelta, prevWear, maintTarget);
             stepRewards.push(reward);
             shiftStepRewards.push(reward);
             episodeUnplannedFailures += reward.newFailures;

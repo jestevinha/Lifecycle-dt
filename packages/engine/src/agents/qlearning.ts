@@ -1,6 +1,7 @@
 import type { Agent } from "./types.js";
 import type { State } from "../types.js";
 import { ACTIONS } from "../actions.js";
+import { createRng } from "../utils.js";
 
 /**
  * Tabular Q-Learning agent.
@@ -14,6 +15,12 @@ export class QLearningAgent implements Agent {
   private readonly alpha: number;
   private readonly gamma: number;
   private lastStateKey: string | null = null;
+  /**
+   * Seeded exploration RNG (Known-Bugs-Fixed #12). Deterministic when `seed`
+   * is provided (typically `config.simSeed`), falls back to `Math.random`
+   * otherwise — so unseeded callers keep the prior (unreproducible) behavior.
+   */
+  private readonly rng: () => number;
 
   constructor(
     alpha = 0.1,
@@ -21,12 +28,14 @@ export class QLearningAgent implements Agent {
     epsilon = 1.0,
     epsilonDecay = 0.99,
     epsilonMin = 0.01,
+    seed?: number,
   ) {
     this.alpha = alpha;
     this.gamma = gamma;
     this.epsilon = epsilon;
     this.epsilonDecay = epsilonDecay;
     this.epsilonMin = epsilonMin;
+    this.rng = createRng(seed);
     this.qTable = new Map();
   }
 
@@ -34,8 +43,8 @@ export class QLearningAgent implements Agent {
     const key = this.discretize(state);
     this.lastStateKey = key;
 
-    if (Math.random() < this.epsilon) {
-      return Math.floor(Math.random() * ACTIONS.length);
+    if (this.rng() < this.epsilon) {
+      return Math.floor(this.rng() * ACTIONS.length);
     }
 
     const qValues = this.getQ(key);

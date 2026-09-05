@@ -51,14 +51,25 @@ export interface StepRewardComponents {
 /**
  * Detect wear failure transitions by finding workareas whose wear
  * was near the threshold and then reset (dropped sharply).
+ *
+ * `maintainedWorkarea` (Known-Bugs-Fixed #13, fixed 2026-09-05): the index of
+ * the workarea deliberately targeted by this shift's MAINT command, or -1 if
+ * none. Without this, a legitimate late-threshold maintenance reset (e.g. a
+ * `t90`/`t95`-style action firing exactly as intended) is indistinguishable
+ * from a genuine unplanned breakdown — both look like "was ≥95%, then
+ * dropped sharply." Excluding the deliberately-maintained workarea from the
+ * failure count fixes that conflation without changing the detection logic
+ * for every other workarea.
  */
 export function detectFailures(
   prevWear: number[],
   currWear: number[],
+  maintainedWorkarea: number = -1,
 ): number {
   let newFailures = 0;
   const len = Math.min(prevWear.length, currWear.length, 16);
   for (let i = 0; i < len; i++) {
+    if (i === maintainedWorkarea) continue; // deliberate reset, not a failure
     const wasNearThreshold = prevWear[i] > WEAR_THRESHOLD * 0.95;
     const hasReset = currWear[i] < prevWear[i] * 0.1; // dropped >90%
     if (wasNearThreshold && hasReset) newFailures++;
@@ -68,14 +79,20 @@ export function detectFailures(
 
 /**
  * Compute per-step reward with failure and wear penalties.
+ *
+ * `maintainedWorkarea` (Known-Bugs-Fixed #13): forwarded to `detectFailures`
+ * so a step's deliberate MAINT target isn't miscounted as an unplanned
+ * failure. Defaults to -1 (no exclusion) so existing callers (probe scripts)
+ * that don't pass it keep their prior behavior.
  */
 export function computeStepReward(
   curr: KpiStep,
   accidentDelta: number,
   prevWear: number[],
+  maintainedWorkarea: number = -1,
 ): StepRewardComponents {
   const currWear = curr.wearByWorkarea ?? [];
-  const newFailures = detectFailures(prevWear, currWear);
+  const newFailures = detectFailures(prevWear, currWear, maintainedWorkarea);
 
   const throughput      = THROUGHPUT_WEIGHT * curr.setpointRate;
   const costPenalty     = COST_WEIGHT * curr.productCost;

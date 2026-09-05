@@ -1,6 +1,7 @@
 import type { Agent } from "./types.js";
 import type { State } from "../types.js";
 import { ACTIONS } from "../actions.js";
+import { createRng } from "../utils.js";
 
 /**
  * Multi-Armed Bandit with ε-greedy exploration.
@@ -19,6 +20,12 @@ export class MABAgent implements Agent {
    */
   private readonly useConstantAlpha: boolean;
   private readonly alpha: number;
+  /**
+   * Seeded exploration RNG (Known-Bugs-Fixed #12). Deterministic when `seed`
+   * is provided (typically `config.simSeed`), falls back to `Math.random`
+   * otherwise — so unseeded callers keep the prior (unreproducible) behavior.
+   */
+  private readonly rng: () => number;
 
   constructor(
     epsilon = 1.0,
@@ -26,20 +33,22 @@ export class MABAgent implements Agent {
     epsilonMin = 0.01,
     useConstantAlpha = false,
     alpha = 0.1,
+    seed?: number,
   ) {
     this.epsilon = epsilon;
     this.epsilonDecay = epsilonDecay;
     this.epsilonMin = epsilonMin;
     this.useConstantAlpha = useConstantAlpha;
     this.alpha = alpha;
+    this.rng = createRng(seed);
     this.counts = new Array(ACTIONS.length).fill(0);
     this.values = new Array(ACTIONS.length).fill(0);
-    console.log(`[MABAgent] updateRule=${useConstantAlpha ? `constant-α(${alpha})` : "sample-average(1/n)"}`);
+    console.log(`[MABAgent] updateRule=${useConstantAlpha ? `constant-α(${alpha})` : "sample-average(1/n)"} seed=${seed ?? "unseeded"}`);
   }
 
   selectAction(_state: State): number {
-    if (Math.random() < this.epsilon) {
-      return Math.floor(Math.random() * ACTIONS.length);
+    if (this.rng() < this.epsilon) {
+      return Math.floor(this.rng() * ACTIONS.length);
     }
     return this.values.indexOf(Math.max(...this.values));
   }

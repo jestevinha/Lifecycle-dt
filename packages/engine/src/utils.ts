@@ -27,3 +27,29 @@ export function createRng(seed?: number | null): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+/**
+ * Index of the maximum value in `values`, breaking ties uniformly at random
+ * via `rng` (Known-Bugs-Fixed #17, fixed 2026-09-12). `Array.indexOf` always
+ * returns the FIRST index achieving the max, so a naive `values.indexOf(Math.max(...values))`
+ * silently favors the lowest-id action whenever several are tied — most
+ * commonly several actions still sitting at their zero-initialized default in
+ * an under-sampled state. Pass the agent's own seeded `rng` (not `Math.random`)
+ * so the tie-break stays reproducible from `simSeed`, consistent with
+ * Known-Bugs-Fixed #12.
+ */
+export function argmaxTieBreak(values: number[], rng: () => number): number {
+  let bestIndices: number[] = [0];
+  let bestValue = values[0];
+  for (let i = 1; i < values.length; i++) {
+    if (values[i] > bestValue) {
+      bestValue = values[i];
+      bestIndices = [i];
+    } else if (values[i] === bestValue) {
+      bestIndices.push(i);
+    }
+  }
+  return bestIndices.length === 1
+    ? bestIndices[0]
+    : bestIndices[Math.floor(rng() * bestIndices.length)];
+}

@@ -278,6 +278,17 @@ export async function runExperiment(
         let preMaintenanceWearFrac = 0;
         // Accumulate per-step rewards within a shift for the agent update
         let shiftStepRewards: StepRewardComponents[] = [];
+        // Cumulative accident count (Java's raw field) as of the start of the
+        // current shift (Known-Bugs-Fixed #15, fixed 2026-09-11). Java's
+        // `numberAccidents` is a running total for the whole episode, so
+        // feeding it straight into State would give a signal that only ever
+        // grows and saturates Q-Learning's top bin (≥3) within the first few
+        // shifts of every ~100-shift episode — dead for ~90% of the episode.
+        // Subtracting this tracker at each shift boundary turns it back into
+        // a live, shift-scoped "did the last shift go badly" signal that
+        // resets every shift instead of ratcheting upward, for both
+        // Q-Learning's discretization and LinUCB's linear feature.
+        let accidentsAtShiftStart = 0;
 
         // Resolve command from current action.
         // Maintenance fires only when the chosen action's threshold is met by
@@ -379,7 +390,16 @@ export async function runExperiment(
                 );
               }
 
-              const shiftState = extractState(kpiStep, config.simSteps);
+              // Shift-scoped accident count (Known-Bugs-Fixed #15): accidents
+              // that occurred DURING this shift, not the episode-cumulative
+              // total. Reset the tracker to the new cumulative baseline so
+              // next shift's delta is computed against this shift's end.
+              const shiftAccidentCount = kpiStep.numberAccidents - accidentsAtShiftStart;
+              accidentsAtShiftStart = kpiStep.numberAccidents;
+              const shiftState = extractState(
+                { ...kpiStep, numberAccidents: shiftAccidentCount },
+                config.simSteps,
+              );
               // Terminal shift has no successor → Q-Learning uses reward only.
               const done = stepIndex === config.simSteps - 1;
               // prevState = decisionState (the state given to selectAction for this shift)
@@ -447,8 +467,19 @@ export async function runExperiment(
       const firstStep = steps[0];
       const lastStep  = steps[steps.length - 1];
 
-      // Extract state from this episode's outcome (used next iteration)
-      prevState = extractState(lastStep, config.simSteps);
+      // Extract state from this episode's outcome (used next iteration).
+      // numberAccidents is now shift-scoped, not episode-cumulative
+      // (Known-Bugs-Fixed #15). At a fresh episode's first decision there is
+      // no "current shift" yet to have had accidents in, so carry 0 — the
+      // same default the very first episode's prevState already uses —
+      // rather than lastStep's raw episode-cumulative total, which would
+      // otherwise immediately re-saturate next episode's first decision.
+      // (This does not touch Known-Bugs-Fixed #16, the separate stale-carry
+      // issue for the other 4 dimensions — out of scope for this fix.)
+      prevState = extractState(
+        useInteractive ? { ...lastStep, numberAccidents: 0 } : lastStep,
+        config.simSteps,
+      );
 
       // Compute episode reward
       let reward: number;

@@ -1,7 +1,7 @@
 import type { Agent } from "./types.js";
 import type { State } from "../types.js";
 import { ACTIONS } from "../actions.js";
-import { createRng } from "../utils.js";
+import { createRng, argmaxTieBreak } from "../utils.js";
 
 /**
  * Multi-Armed Bandit with ε-greedy exploration.
@@ -50,7 +50,9 @@ export class MABAgent implements Agent {
     if (this.rng() < this.epsilon) {
       return Math.floor(this.rng() * ACTIONS.length);
     }
-    return this.values.indexOf(Math.max(...this.values));
+    // Known-Bugs-Fixed #17 (fixed 2026-09-12): random tie-break instead of
+    // always favoring the lowest action id among tied Q-values.
+    return argmaxTieBreak(this.values, this.rng);
   }
 
   update(action: number, reward: number, _prevState: State, _nextState: State, _done = false): void {

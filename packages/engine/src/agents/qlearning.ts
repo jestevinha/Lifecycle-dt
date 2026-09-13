@@ -1,7 +1,7 @@
 import type { Agent } from "./types.js";
 import type { State } from "../types.js";
 import { ACTIONS } from "../actions.js";
-import { createRng } from "../utils.js";
+import { createRng, argmaxTieBreak } from "../utils.js";
 
 /**
  * Tabular Q-Learning agent.
@@ -48,7 +48,10 @@ export class QLearningAgent implements Agent {
     }
 
     const qValues = this.getQ(key);
-    return qValues.indexOf(Math.max(...qValues));
+    // Known-Bugs-Fixed #17 (fixed 2026-09-12): random tie-break instead of
+    // always favoring the lowest action id among tied (usually zero-initialized,
+    // under-sampled) Q-values.
+    return argmaxTieBreak(qValues, this.rng);
   }
 
   update(action: number, reward: number, _prevState: State, nextState: State, done = false): void {
@@ -109,6 +112,13 @@ export class QLearningAgent implements Agent {
       s.stepNorm < 0.33 ? 0 : s.stepNorm <= 0.66 ? 1 : 2,
       // shiftPhaseNorm is exactly {0, 0.5, 1.0} → bins {0, 1, 2}
       s.shiftPhaseNorm < 0.33 ? 0 : s.shiftPhaseNorm <= 0.66 ? 1 : 2,
+      // numberAccidents is shift-scoped as of Known-Bugs-Fixed #15 (fixed
+      // 2026-09-11): accidents during the shift just completed, reset every
+      // shift by the caller (experiments.ts) — not the episode-cumulative
+      // total. These {0, 1-2, ≥3} bins were always sized for a per-shift
+      // count; the bug was that a monotonically-growing cumulative value was
+      // being fed in, saturating bin 2 permanently within the first few
+      // shifts of every episode. No bin-threshold change needed here.
       s.numberAccidents === 0 ? 0 : s.numberAccidents <= 2 ? 1 : 2,
     ];
     if (s.maxWearFraction !== undefined) {

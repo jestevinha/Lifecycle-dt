@@ -110,14 +110,21 @@ export class LinUCBAgent implements Agent {
 //   rawMaterialQuality:[0,  1]   ← Const.RAW_MAT_MIN_SPEC / RAW_MAT_MAX_SPEC
 //   stepNorm:          [0,  1]   ← already normalised by extractState
 //   shiftPhaseNorm:    [0,  1]   ← already in {0, 0.5, 1.0} ⊂ [0,1]
-//   numberAccidents:   [0, 10]   ← soft cap; episode max at very_high rate ≈ 6–48 cumulative
+//   numberAccidents:   [0, 10]   ← soft cap; SHIFT-SCOPED count (accidents during the
+//                                  shift just completed), not episode-cumulative — see
+//                                  Known-Bugs-Fixed #15 (fixed 2026-09-11). Before that
+//                                  fix this fed the raw episode-running total (up to
+//                                  ~6–48 by end of episode at very_high rate), which
+//                                  only ever grew and was collinear with stepNorm; the
+//                                  cap of 10 is generous headroom for a single shift
+//                                  and rarely binds now.
 //   maxWearFraction:   [0,  1]   ← already normalised by extractState (÷ WEAR_THRESHOLD)
 //
 // All constants are FIXED (not adaptive) — adaptive normalisation would break
 // the stationarity assumption of the linear bandit and reintroduce context drift.
 const TEMP_NORM_MIN = 10;
 const TEMP_NORM_MAX = 30;
-const ACC_NORM_MAX  = 10;  // cumulative accident cap; clipped, not wrapped
+const ACC_NORM_MAX  = 10;  // shift-scoped accident cap; clipped, not wrapped
 
 function stateToVector(s: State): number[] {
   const v = [

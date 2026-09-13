@@ -14,12 +14,14 @@ export const FAILURE_PENALTY    = 8.0;     // per workarea failure event
 export const WEAR_PENALTY_SCALE = 0.4;     // was 1.0 + linear; now multiplies wearFrac²
 export const ACCIDENT_PENALTY   = 5.0;     // per accident delta (tuned: pushes agents toward high over very_high)
 export const COST_WEIGHT        = 0.5;     // productCost weight
-// Throughput term: multiplies the BOUNDED setpoint rate (∈[0.2,0.8]) so it competes
-// on the same scale as the undiluted event-count penalties (accidents/failures are
-// summed, not averaged). Using the bounded setpoint — instead of totalRate (≈16×setpoint,
-// unbounded) — is what makes the winning tier rise smoothly with the weight
-// (very_low→medium→high→very_high) rather than collapsing to very_high immediately.
-export const THROUGHPUT_WEIGHT  = 8;       // × setpointRate; calibrated (medium/high competitive, ordering intact, risk contained)
+// Throughput term: multiplies the ACHIEVED plant output, normalized to the same
+// [0.2,0.8]-ish scale as setpointRate by dividing the raw 16-workarea sum
+// (totalRate, ∈[0,12.8] at full capacity) by the 16 total workareas — NOT by the
+// count still online, which would average away the very production loss this term
+// exists to surface. At 16/16 online, totalRate/16 == setpointRate exactly, so the
+// term degrades gracefully from the old setpointRate-only behavior as workareas fail.
+export const THROUGHPUT_WEIGHT  = 8;       // × (totalRate/16); calibrated (medium/high competitive, ordering intact, risk contained)
+export const TOTAL_WORKAREAS    = 16;      // plant-wide capacity divisor for the throughput term
 
 // ─── maintenance timing penalty ──────────────────────────────────
 // Penalises triggering maintenance when wear is low (wasted downtime).
@@ -39,7 +41,7 @@ export function maintenancePenalty(maxWearFraction: number): number {
 
 // ─── step reward components ───────────────────────────────────────
 export interface StepRewardComponents {
-  throughput:      number;   // THROUGHPUT_WEIGHT × setpointRate (bounded [0.2,0.8])
+  throughput:      number;   // THROUGHPUT_WEIGHT × (totalRate/16) — achieved output, plant-capacity-normalized
   costPenalty:     number;   // COST_WEIGHT × productCost
   accidentPenalty: number;   // ACCIDENT_PENALTY × accidentDelta
   failurePenalty:  number;   // FAILURE_PENALTY × newFailures
@@ -49,17 +51,20 @@ export interface StepRewardComponents {
 }
 
 /**
- * Detect wear failure transitions by finding workareas whose wear
- * was near the threshold and then reset (dropped sharply).
+ * Detect wear failure transitions by finding workareas whose wear crosses
+ * WEAR_THRESHOLD this step (STATUS_ON → STATUS_FAILURE onset in Unit.java).
+ *
+ * Fires exactly once per failure, at onset — not at self-heal completion.
+ * Wear is frozen (not incremented) for the whole STATUS_FAILURE/STATUS_MAINTENANCE
+ * dwell in Unit.java, so currWear[i] stays >= WEAR_THRESHOLD on every subsequent
+ * step (no refire), and the eventual self-heal reset (wearStatus → 0) sees
+ * prevWear[i] already >= WEAR_THRESHOLD, so the reset step doesn't match either.
  *
  * `maintainedWorkarea` (Known-Bugs-Fixed #13, fixed 2026-09-05): the index of
  * the workarea deliberately targeted by this shift's MAINT command, or -1 if
- * none. Without this, a legitimate late-threshold maintenance reset (e.g. a
- * `t90`/`t95`-style action firing exactly as intended) is indistinguishable
- * from a genuine unplanned breakdown — both look like "was ≥95%, then
- * dropped sharply." Excluding the deliberately-maintained workarea from the
- * failure count fixes that conflation without changing the detection logic
- * for every other workarea.
+ * none. Preventive maintenance normally resets wear before it ever reaches
+ * WEAR_THRESHOLD, so it wouldn't trigger this detector anyway — the exclusion
+ * remains as a guard for the edge case of a maintenance threshold at/near 1.0.
  */
 export function detectFailures(
   prevWear: number[],
@@ -70,9 +75,8 @@ export function detectFailures(
   const len = Math.min(prevWear.length, currWear.length, 16);
   for (let i = 0; i < len; i++) {
     if (i === maintainedWorkarea) continue; // deliberate reset, not a failure
-    const wasNearThreshold = prevWear[i] > WEAR_THRESHOLD * 0.95;
-    const hasReset = currWear[i] < prevWear[i] * 0.1; // dropped >90%
-    if (wasNearThreshold && hasReset) newFailures++;
+    const crossedThreshold = prevWear[i] < WEAR_THRESHOLD && currWear[i] >= WEAR_THRESHOLD;
+    if (crossedThreshold) newFailures++;
   }
   return newFailures;
 }
@@ -94,7 +98,7 @@ export function computeStepReward(
   const currWear = curr.wearByWorkarea ?? [];
   const newFailures = detectFailures(prevWear, currWear, maintainedWorkarea);
 
-  const throughput      = THROUGHPUT_WEIGHT * curr.setpointRate;
+  const throughput      = THROUGHPUT_WEIGHT * (curr.totalRate / TOTAL_WORKAREAS);
   const costPenalty     = COST_WEIGHT * curr.productCost;
   const accidentPenalty = ACCIDENT_PENALTY * accidentDelta;
   const failurePenalty  = FAILURE_PENALTY * newFailures;

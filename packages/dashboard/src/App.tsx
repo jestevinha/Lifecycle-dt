@@ -33,10 +33,26 @@ const AGENT_COLORS: Record<string, string> = {
 // no agent silently falls back to a constructor default. MAB values are the confirmed
 // F=50 schedule (epsilonDecay=0.01^(1/50)=0.91201, NOT the 0.91 constructor default);
 // LinUCB/Q-Learning mirror their current constructor defaults.
+// MAB: useConstantAlpha=1 (true) + alpha=0.1 decided 2026-09-05 for the final reference
+// run — a deliberate, config-only choice over the sample-average default (analysis
+// recommended sample-average; João chose constant-alpha anyway). See
+// 04-Experiments/MAB-Update-Rule-Decision.md and 03-Agents/MAB-Agent.md. Encoded as
+// numeric 1 rather than boolean true to keep this object's Record<string, number> type.
 const AGENT_DEFAULTS: Record<string, Record<string, number>> = {
-  mab: { epsilon: 1.0, epsilonDecay: 0.91201, epsilonMin: 0.01 },
+  mab: { epsilon: 1.0, epsilonDecay: 0.91201, epsilonMin: 0.01, useConstantAlpha: 1, alpha: 0.1 },
   linucb: { alpha: 2.5 },
-  qlearning: { alpha: 0.1, gamma: 0.95, epsilon: 1.0, epsilonDecay: 0.99, epsilonMin: 0.01 },
+  // qlearning.epsilonMin raised 0.01→0.05 (2026-09-12, Known-Bugs-Fixed #16-followup /
+  // Experiment-36-Results.md): with epsilonDecay=0.99, epsilon hits its floor around
+  // episode 458 of 1000, after which exploration is only ~1% of shift-decisions —
+  // far too sparse to keep discovering new states in the 1,458-state (3^5×6) table.
+  // #36's own q_table_size growth curve shows coverage essentially flatlining by
+  // episode ~900 (614/1458, ~42%). A floor of 0.05 was tried and reverted once before
+  // ("prevented convergence" — see project history), but that was under the OLD
+  // 243-state/10-action table (2,430 values); the table is now 1,458×20=29,160 values,
+  // 12× larger, so revisiting the same floor value is an informed re-test given the
+  // redesign, not a blind repeat of a already-rejected setting. Decay left at 0.99
+  // (same shape, higher floor) so this is a single, isolated, testable change.
+  qlearning: { alpha: 0.1, gamma: 0.95, epsilon: 1.0, epsilonDecay: 0.99, epsilonMin: 0.05 },
 };
 
 // Default per-workarea wear-rate spread. Must be nonzero (in (0,1]) or the gate rejects
@@ -383,10 +399,16 @@ function RunModal({
     agents: string[];
   }) => void;
 }) {
-  const [simSteps, setSimSteps] = useState(200);
+  // Reference config, decided 2026-09-06: simSteps=800 (100 shifts) so an episode
+  // spans multiple full wear/maintenance cycles, matching the thesis's actual
+  // "lifecycle management" framing rather than ~1 cycle per episode. See
+  // 04-Experiments/SimSteps-Horizon-Decision.md in the vault. totalEpisodes=1000
+  // and wearRateSpread match #30/#31/#33; interactive defaults on since batch mode
+  // is not valid for the thesis comparison (see Known-Bugs-Fixed bug #10).
+  const [simSteps, setSimSteps] = useState(800);
   const [simSeed, setSimSeed] = useState(42);
-  const [totalEpisodes, setTotalEpisodes] = useState(100);
-  const [interactive, setInteractive] = useState(false);
+  const [totalEpisodes, setTotalEpisodes] = useState(1000);
+  const [interactive, setInteractive] = useState(true);
   const [wearRateSpread, setWearRateSpread] = useState(DEFAULT_WEAR_RATE_SPREAD);
   const [selectedAgents, setSelectedAgents] = useState<Set<string>>(
     new Set(AGENT_TYPES),

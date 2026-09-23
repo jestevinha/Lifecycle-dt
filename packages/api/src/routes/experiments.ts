@@ -6,9 +6,9 @@ import {
   MABAgent, LinUCBAgent, QLearningAgent,
   extractState, clockToMinutes,
   computeStepReward, aggregateShiftReward,
-  ACCIDENT_PENALTY, COST_WEIGHT,
-  STEPS_PER_SHIFT, shouldTriggerMaintenance,
-  WEAR_THRESHOLD, maintenancePenalty, MAINT_IDEAL_WEAR,
+  resolveRewardWeights,
+  STEPS_PER_SHIFT,
+  WEAR_THRESHOLD, TOTAL_WORKAREAS,
   validateExperimentConfig,
 } from "@dt/engine";
 import type { ExperimentConfig, KpiStep, AgentConfig, Agent, State, StepRewardComponents, StepCommand } from "@dt/engine";
@@ -122,7 +122,7 @@ function createAgent(cfg: AgentConfig, seed?: number): Agent {
     case "linucb":
       return new LinUCBAgent(h.alpha);
     case "qlearning":
-      return new QLearningAgent(h.alpha, h.gamma, h.epsilon, h.epsilonDecay, h.epsilonMin, seed);
+      return new QLearningAgent(h.alpha, h.gamma, h.epsilon, h.epsilonDecay, h.epsilonMin, seed, !!h.useConstantAlpha);
   }
 }
 
@@ -197,7 +197,7 @@ export async function runExperiment(
   validateExperimentConfig(config);
 
   const insertRun = db.prepare(
-    "INSERT INTO runs (experiment_id, agent_type, hyperparams_json, total_episodes) VALUES (?, ?, ?, ?)"
+    "INSERT INTO runs (experiment_id, agent_type, hyperparams_json, total_episodes, reward_profile) VALUES (?, ?, ?, ?, ?)"
   );
   const insertEpisode = db.prepare(
     `INSERT INTO episodes (run_id, episode_num, action, action_name, reward,
@@ -215,14 +215,16 @@ export async function runExperiment(
 
   for (const agentCfg of config.agents) {
     const agent = createAgent(agentCfg, config.simSeed);
+    const rewardProfile = agentCfg.rewardProfile ?? "balanced";
+    const weights = resolveRewardWeights(agentCfg.rewardProfile);
 
     const epsInfo = agent.getEpsilon?.() != null
       ? ` ε=${agent.getEpsilon!()},decay=${agent.getEpsilonDecay!()}`
       : "";
-    console.log(`[exp${expId}] ${agentCfg.type} ${config.totalEpisodes}ep AP=${ACCIDENT_PENALTY}${epsInfo}`);
+    console.log(`[exp${expId}] ${agentCfg.type} profile=${rewardProfile} ${config.totalEpisodes}ep TW=${weights.throughputWeight} CW=${weights.costWeight}${epsInfo}`);
 
     const runResult = insertRun.run(
-      expId, agentCfg.type, JSON.stringify(agentCfg.hyperparams), config.totalEpisodes
+      expId, agentCfg.type, JSON.stringify(agentCfg.hyperparams), config.totalEpisodes, rewardProfile
     );
     const runId = runResult.lastInsertRowid;
 
@@ -251,7 +253,147 @@ export async function runExperiment(
       const wearAtMaintValues: number[] = [];
       let episodeUnplannedFailures = 0;
 
-      if (useInteractive) {
+      if (useInteractive && config.perWorkareaMode) {
+        // ── Per-workarea interactive mode (2026-09-20) ──
+        // Same shift-level cadence as the plant-wide mode below, but the
+        // agent makes ONE selectAction/update decision PER WORKAREA per
+        // shift (16 instead of 1), each seeing that workarea's own wear
+        // fraction instead of the plant-wide max, and each workarea is sent
+        // its own rate. All 16 decisions this shift are trained on the SAME
+        // shift-level aggregate reward (the reward function stays plant-wide
+        // and unchanged — only what each decision SEES and CONTROLS differs).
+        // The preventive-maintenance slot stays capped at 1/shift plant-wide:
+        // among workareas whose chosen action requests maintenance, only the
+        // highest-wear one actually gets it — the others' rate still applies,
+        // but their maintenance request goes unserved this shift, which they
+        // then learn from via the normal reward signal (same capacity
+        // contention already documented for the single-decision mode in
+        // Reward-Function-Evolution.md). See Parameter-Sharing-Across-Actions.md
+        // in the vault for the design rationale.
+        const seed = config.simSeed + i;
+        const actionCounts = new Map<number, number>(); // pooled across all 16 workareas' choices
+
+        let decisionStates: State[] = new Array(TOTAL_WORKAREAS).fill(prevState);
+        let currentActionIds: number[] = new Array(TOTAL_WORKAREAS).fill(0);
+        let prevAccidents = 0;
+        let prevWear: number[] = new Array(TOTAL_WORKAREAS).fill(0);
+        let subStep = 0;
+        // Every workarea whose own decision requests maintainNow this shift
+        // gets it — no 1-per-shift arbitration (2026-09-21, see
+        // Per-Workarea-Rate-Control.md: removed specifically to test whether
+        // the shared-reward credit-assignment noise from workareas losing
+        // that arbitration was driving Q-Learning's divergence in exp 71).
+        let maintTargets: number[] = [];
+        let shiftStepRewards: StepRewardComponents[] = [];
+        let accidentsAtShiftStart = 0;
+
+        // First decision of the run/episode has no per-workarea wear data yet
+        // (prevWear is all zero) — every workarea starts from the same
+        // plant-wide prevState, same convention the single-decision mode
+        // already uses for its first-ever decision.
+        for (let wa = 0; wa < TOTAL_WORKAREAS; wa++) {
+          currentActionIds[wa] = agent.selectAction(prevState);
+        }
+
+        function resolveCommandPerWorkarea(): StepCommand {
+          const rates = currentActionIds.map(aid => ACTIONS[aid].setpointRate);
+          // Same eligibility rule as the plant-wide mode (exclude workareas
+          // already at/above WEAR_THRESHOLD) — every eligible workarea whose
+          // own action requests maintainNow gets it this shift, no cap.
+          const targets: number[] = [];
+          for (let wa = 0; wa < TOTAL_WORKAREAS; wa++) {
+            if (!ACTIONS[currentActionIds[wa]].maintainNow) continue;
+            if (prevWear[wa] <= 0 || prevWear[wa] >= WEAR_THRESHOLD) continue;
+            targets.push(wa);
+          }
+          maintTargets = targets;
+          for (const t of targets) wearAtMaintValues.push(prevWear[t]);
+          return { rate: rates, maintainWorkarea: targets.length > 0 ? targets : undefined };
+        }
+
+        const initialCmd = resolveCommandPerWorkarea();
+
+        steps = await runInteractiveSimulation(
+          { steps: config.simSteps, seed, wearRateSpread: config.wearRateSpread },
+          initialCmd,
+          (kpiStep: KpiStep, stepIndex: number) => {
+            subStep++;
+
+            sendSSE(res, "step", {
+              agentType: agentCfg.type,
+              episode: i,
+              stepIndex,
+              kpiStep,
+            });
+
+            for (const aid of currentActionIds) {
+              actionCounts.set(aid, (actionCounts.get(aid) ?? 0) + 1);
+            }
+
+            const accidentDelta = kpiStep.numberAccidents - prevAccidents;
+            prevAccidents = kpiStep.numberAccidents;
+            const reward = computeStepReward(kpiStep, accidentDelta, prevWear, maintTargets, weights);
+            stepRewards.push(reward);       // full-episode accumulation, for the reported reward below
+            shiftStepRewards.push(reward);  // resets each shift, for the agent's training signal
+            episodeUnplannedFailures += reward.newFailures;
+            prevWear = kpiStep.wearByWorkarea ? [...kpiStep.wearByWorkarea] : prevWear;
+
+            if (subStep >= STEPS_PER_SHIFT || stepIndex === config.simSteps - 1) {
+              const shiftReward = aggregateShiftReward(shiftStepRewards);
+
+              if (i === 0) {
+                const maxW = prevWear.length > 0 ? Math.max(...prevWear) / WEAR_THRESHOLD : 0;
+                console.log(
+                  `[trace ${agentCfg.type} ep0] step=${stepIndex} maxWear=${(maxW * 100).toFixed(1)}% ` +
+                  `maint=${maintTargets.length > 0 ? maintTargets.map(t => `wa${t}`).join(",") : "no"} R=${shiftReward.toFixed(2)}`,
+                );
+              }
+
+              const shiftAccidentCount = kpiStep.numberAccidents - accidentsAtShiftStart;
+              accidentsAtShiftStart = kpiStep.numberAccidents;
+              const done = stepIndex === config.simSteps - 1;
+
+              // Update and re-select for every workarea, all on the same
+              // shift-level reward — see the block comment above this branch.
+              for (let wa = 0; wa < TOTAL_WORKAREAS; wa++) {
+                const nextWorkareaState = extractState(
+                  { ...kpiStep, numberAccidents: shiftAccidentCount },
+                  config.simSteps,
+                  wa,
+                );
+                agent.update(currentActionIds[wa], shiftReward, decisionStates[wa], nextWorkareaState, done);
+                decisionStates[wa] = nextWorkareaState;
+                currentActionIds[wa] = agent.selectAction(nextWorkareaState);
+              }
+              subStep = 0;
+              shiftStepRewards = [];
+
+              return resolveCommandPerWorkarea();
+            }
+
+            return { rate: currentActionIds.map(aid => ACTIONS[aid].setpointRate) };
+          },
+        );
+
+        if (steps.length === 0) {
+          console.warn(`[experiment] Episode ${i} produced no steps, skipping`);
+          continue;
+        }
+
+        for (const aid of currentActionIds) {
+          actionCounts.set(aid, (actionCounts.get(aid) ?? 0) + 1);
+        }
+
+        dominantActionId = 0;
+        let maxCount = 0;
+        for (const [aid, count] of actionCounts) {
+          if (count > maxCount) { maxCount = count; dominantActionId = aid; }
+        }
+
+        if (wearAtMaintValues.length > 0) {
+          avgWearAtMaint = wearAtMaintValues.reduce((s, v) => s + v, 0) / wearAtMaintValues.length;
+        }
+      } else if (useInteractive) {
         // ── Interactive mode: shift-level agent control ──
         // Agent decides once per shift (every STEPS_PER_SHIFT Java steps).
         // Within a shift, the setpoint and maintenance command are held constant.
@@ -271,11 +413,10 @@ export async function runExperiment(
         let subStep = 0;
         // The rate from the current action (always present now)
         let shiftRate = ACTIONS[currentActionId].setpointRate;
-        // Workarea being maintained this shift (-1 = none)
-        let maintTarget = -1;
-        // Wear fraction AT THE MOMENT maintenance was triggered (pre-reset).
-        // Used by the penalty so it reflects timing quality, not post-reset wear.
-        let preMaintenanceWearFrac = 0;
+        // Workareas being maintained this shift (empty = none). 2026-09-21:
+        // ALL eligible workareas, not just the single most-worn one — see the
+        // resolveCommand() comment below and Per-Workarea-Rate-Control.md.
+        let maintTargets: number[] = [];
         // Accumulate per-step rewards within a shift for the agent update
         let shiftStepRewards: StepRewardComponents[] = [];
         // Cumulative accident count (Java's raw field) as of the start of the
@@ -291,34 +432,33 @@ export async function runExperiment(
         let accidentsAtShiftStart = 0;
 
         // Resolve command from current action.
-        // Maintenance fires only when the chosen action's threshold is met by
-        // the current max wear fraction — the agent learns a *policy*, not a
-        // fixed "always maintain" schedule.
+        // Maintenance fires this shift iff the chosen action's maintainNow flag
+        // is set — a direct per-shift agent decision, not an environment-side
+        // comparison of live wear to a static threshold. The agent must observe
+        // wear (maxWearFraction, interactive-mode state) to time this well; an
+        // agent that can't (MAB) has to pick one fixed maintain-now/no-maintain
+        // choice for the whole run. See actions.ts for the full rationale.
         function resolveCommand(): number | StepCommand {
           shiftRate = ACTIONS[currentActionId].setpointRate;
-          // Exclude workareas at or above WEAR_THRESHOLD: they are already in
-          // STATUS_FAILURE or auto-maintenance, so targeting them with the single
-          // preventive-MAINT slot wastes it when other workareas are still healthy
-          // and approaching failure.
-          const firstEligible = prevWear.findIndex(w => w < WEAR_THRESHOLD);
-          const maxIdx = firstEligible < 0
-            ? 0
-            : prevWear.reduce(
-                (best, w, idx) => (w < WEAR_THRESHOLD && w > prevWear[best] ? idx : best),
-                firstEligible,
-              );
-          const maxWearFrac = prevWear.length > 0 && firstEligible >= 0
-            ? prevWear[maxIdx] / WEAR_THRESHOLD
-            : 0;
-
-          if (firstEligible >= 0 && prevWear[maxIdx] > 0 && shouldTriggerMaintenance(currentActionId, maxWearFrac)) {
-            maintTarget = maxIdx;
-            preMaintenanceWearFrac = maxWearFrac;  // capture PRE-reset wear for penalty
-            wearAtMaintValues.push(prevWear[maxIdx]);
-            return { rate: shiftRate, maintainWorkarea: maintTarget };
+          // Maintain EVERY eligible workarea when maintainNow fires, not just
+          // the single most-worn one (2026-09-21 — João: the point is for the
+          // agent to find the optimum wear at which to request maintenance
+          // via the natural too-early/too-late trade-off, not to have the
+          // environment additionally ration a scarce slot on top of that
+          // decision — see Per-Workarea-Rate-Control.md). "Eligible" is
+          // unchanged: 0 < wear < WEAR_THRESHOLD (has accumulated some wear,
+          // not already failed/auto-maintaining).
+          const maintTargetsThisShift = ACTIONS[currentActionId].maintainNow
+            ? prevWear.reduce<number[]>((acc, w, idx) => {
+                if (w > 0 && w < WEAR_THRESHOLD) acc.push(idx);
+                return acc;
+              }, [])
+            : [];
+          maintTargets = maintTargetsThisShift;
+          if (maintTargetsThisShift.length > 0) {
+            for (const idx of maintTargetsThisShift) wearAtMaintValues.push(prevWear[idx]);
+            return { rate: shiftRate, maintainWorkarea: maintTargetsThisShift };
           }
-          maintTarget = -1;
-          preMaintenanceWearFrac = 0;
           return shiftRate;
         }
 
@@ -344,11 +484,12 @@ export async function runExperiment(
             // Per-step reward with failure & wear penalties
             const accidentDelta = kpiStep.numberAccidents - prevAccidents;
             prevAccidents = kpiStep.numberAccidents;
-            // maintTarget: this shift's deliberate MAINT workarea (-1 if none),
-            // set by resolveCommand() below and in scope for every step of this
-            // shift — threading it here fixes Known-Bugs-Fixed #13 (a deliberate
-            // late-threshold maintenance reset no longer miscounts as a failure).
-            const reward = computeStepReward(kpiStep, accidentDelta, prevWear, maintTarget);
+            // maintTargets: this shift's deliberate MAINT workareas (empty if
+            // none), set by resolveCommand() below and in scope for every step
+            // of this shift — threading it here fixes Known-Bugs-Fixed #13 (a
+            // deliberate late-threshold maintenance reset no longer miscounts
+            // as a failure).
+            const reward = computeStepReward(kpiStep, accidentDelta, prevWear, maintTargets, weights);
             stepRewards.push(reward);
             shiftStepRewards.push(reward);
             episodeUnplannedFailures += reward.newFailures;
@@ -358,34 +499,26 @@ export async function runExperiment(
             if (subStep >= STEPS_PER_SHIFT || stepIndex === config.simSteps - 1) {
               let shiftReward = aggregateShiftReward(shiftStepRewards);
 
-              // Penalise maintenance triggered at low wear (wasted downtime).
-              // Uses PRE-maintenance wear (captured at MAINT trigger time) so the
-              // penalty reflects timing quality — not the near-zero post-reset wear.
-              if (maintTarget >= 0) {
-                const penalty = maintenancePenalty(preMaintenanceWearFrac);
-                shiftReward -= penalty;
-                if (i === 0) {
-                  console.log(
-                    `[trace maint-penalty ep0] preWear=${(preMaintenanceWearFrac * 100).toFixed(1)}% ` +
-                    `penalty=${penalty.toFixed(3)} ` +
-                    `(ideal≥${(MAINT_IDEAL_WEAR * 100).toFixed(0)}% → 0)`,
-                  );
-                }
-              }
+              // No maintenance-timing penalty here (removed 2026-09-19, see
+              // Known-Bugs-Fixed / Qlearning-Linear-Approximation in the vault):
+              // maintenance's only cost is the natural production loss while the
+              // targeted workarea is offline (Unit.java sets currRate=0 under
+              // STATUS_MAINTENANCE, which the `throughput` term already reflects
+              // for however many steps it stays offline). An explicit hand-tuned
+              // penalty on top of that would bias the agent toward a modeler's
+              // assumption about "ideal" wear timing instead of letting it learn
+              // the tradeoff from the environment's actual, unbiased signal.
 
               // Episode-0 sanity trace: one line per shift, so you can eyeball
               // whether the agent's maintenance timing actually varies with wear.
               if (i === 0) {
                 const maxW = prevWear.length > 0 ? Math.max(...prevWear) / WEAR_THRESHOLD : 0;
                 const action = ACTIONS[currentActionId];
-                const thrStr = Number.isFinite(action.maintenanceThreshold)
-                  ? action.maintenanceThreshold.toFixed(2)
-                  : "∞";
                 console.log(
                   `[trace ${agentCfg.type} ep0] step=${stepIndex} ` +
                   `wear=${(maxW * 100).toFixed(1)}% ` +
-                  `action=${action.name}(rate=${action.setpointRate},τ=${thrStr}) ` +
-                  `maint=${maintTarget >= 0 ? `wa${maintTarget}` : "no"} ` +
+                  `action=${action.name}(rate=${action.setpointRate},maintainNow=${action.maintainNow}) ` +
+                  `maint=${maintTargets.length > 0 ? maintTargets.map(t => `wa${t}`).join(",") : "no"} ` +
                   `R=${shiftReward.toFixed(2)}`,
                 );
               }
@@ -419,7 +552,7 @@ export async function runExperiment(
 
             // Within a shift: hold the same command
             // Only send MAINT on first sub-step; rest of shift just sends rate
-            if (maintTarget >= 0 && subStep === 1) {
+            if (maintTargets.length > 0 && subStep === 1) {
               // First sub-step after shift boundary already sent MAINT via resolveCommand
               // Subsequent sub-steps just send the rate (wear already reset)
               return shiftRate;
@@ -488,24 +621,19 @@ export async function runExperiment(
       const newAccidents   = lastStep.numberAccidents - firstStep.numberAccidents;
 
       if (useInteractive && stepRewards.length > 0) {
-        // Interactive: aggregate per-step rewards (preserves sharp failure signal)
+        // Interactive: aggregate per-step rewards (preserves sharp failure signal).
         //
-        // ⚠️ KNOWN, CURRENTLY-UNDECIDED INCONSISTENCY (flagged 2026-08-01):
-        // This recomputes aggregateShiftReward(stepRewards) from scratch and therefore
-        // EXCLUDES the maintenancePenalty (WASTED_MAINT_PENALTY) that was subtracted from
-        // the per-shift reward the AGENT trained on above (see line ~329, `shiftReward -= penalty`).
-        // So the TRAINING signal and the STORED/REPORTED episode reward differ: the agent is
-        // penalised for wasteful maintenance timing, but that penalty never appears in the DB/CSV
-        // `reward` column. This is intentionally NOT fixed here — the decision of whether the
-        // stored reward should include the planned-maintenance penalty is still open. Do not
-        // "reconcile" these without deciding that question first. See the pre-flight-validation
-        // prompt / this date for context.
+        // Recomputes aggregateShiftReward(stepRewards) from scratch, same as the
+        // per-shift reward the agent trained on above — the two are now identical
+        // (previously they diverged by the maintenance-timing penalty subtracted
+        // from the training signal only; that penalty was removed 2026-09-19, so
+        // there is nothing left for this recomputation to exclude).
         reward = aggregateShiftReward(stepRewards);
       } else {
         // Batch mode: original formula (no wear/failure data available)
         const lastClockMin = clockToMinutes(lastStep.clock);
         const numShifts    = Math.max(lastClockMin / 480, 1);
-        reward = avgTotalRate - COST_WEIGHT * avgProductCost - ACCIDENT_PENALTY * (newAccidents / numShifts);
+        reward = avgTotalRate - weights.costWeight * avgProductCost - weights.accidentPenalty * (newAccidents / numShifts);
       }
 
       // Energy efficiency: kWh per part (cumEnergy is in Wh)

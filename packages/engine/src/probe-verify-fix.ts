@@ -18,7 +18,7 @@ import {
   computeStepReward, aggregateShiftReward, extractState,
   WEAR_THRESHOLD, maintenancePenalty,
 } from "./reward.js";
-import { ACTIONS, STEPS_PER_SHIFT, shouldTriggerMaintenance } from "./actions.js";
+import { ACTIONS, STEPS_PER_SHIFT } from "./actions.js";
 import type { KpiStep, State } from "./types.js";
 
 const N_EPISODES = 500;   // matches exp 25 for clean comparison
@@ -74,7 +74,7 @@ async function runAgentEpisodes(
       const maxWearFrac = prevWear.length > 0 && firstEligible >= 0
         ? prevWear[maxIdx] / WEAR_THRESHOLD
         : 0;
-      if (firstEligible >= 0 && prevWear[maxIdx] > 0 && shouldTriggerMaintenance(currentActionId, maxWearFrac)) {
+      if (firstEligible >= 0 && prevWear[maxIdx] > 0 && ACTIONS[currentActionId].maintainNow) {
         maintTarget = maxIdx;
         preMaintenanceWearFrac = maxWearFrac;
         return { rate: shiftRate, maintainWorkarea: maintTarget };

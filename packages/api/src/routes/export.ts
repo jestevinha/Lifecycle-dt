@@ -9,6 +9,7 @@ exportRouter.get("/:experimentId/csv", (req, res) => {
   const rows = db.prepare(`
     SELECT
       r.agent_type,
+      r.reward_profile,
       e.episode_num,
       e.action,
       e.action_name,

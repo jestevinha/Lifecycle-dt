@@ -9,6 +9,8 @@ export interface Experiment {
   status: "pending" | "running" | "completed" | "failed";
 }
 
+export type RewardProfile = "balanced" | "production" | "efficiency";
+
 export interface Run {
   id: number;
   experiment_id: number;
@@ -16,6 +18,60 @@ export interface Run {
   hyperparams_json: string;
   total_episodes: number;
   final_reward: number | null;
+  /** NULL on rows written before this column existed — treat as "balanced". */
+  reward_profile: RewardProfile | null;
+}
+
+const AGENT_LABELS: Record<string, string> = {
+  mab: "MAB",
+  linucb: "LinUCB",
+  qlearning: "Q-Learning",
+};
+
+const PROFILE_LABELS: Record<RewardProfile, string> = {
+  balanced: "Balanced",
+  production: "Prod",
+  efficiency: "Eff",
+};
+
+/**
+ * Stable per-run dictionary key. An experiment can now hold more than one run
+ * for the same agent_type (e.g. mab/production + mab/efficiency, from the
+ * "compare" reward mode) — panels that used to key their per-agent data by
+ * bare agent_type would silently overwrite one run's data with another's.
+ * Always key by this instead of `run.agent_type`.
+ */
+export function runKey(run: Run): string {
+  return `${run.agent_type}:${run.reward_profile ?? "balanced"}`;
+}
+
+/** Human-readable legend/label for a run — includes the profile only when it's non-default. */
+export function runLabel(run: Run): string {
+  const agent = AGENT_LABELS[run.agent_type] ?? run.agent_type;
+  const profile = run.reward_profile ?? "balanced";
+  return profile === "balanced" ? agent : `${agent} (${PROFILE_LABELS[profile]})`;
+}
+
+/**
+ * Color per run, keyed the same way as runKey(). Same base hue per agent
+ * (matches the historical AGENT_COLORS), shaded lighter for "production" and
+ * darker for "efficiency" so agent×profile combos stay visually distinct
+ * without agents losing their established identity color.
+ */
+export const RUN_COLORS: Record<string, string> = {
+  "mab:balanced": "#0D9488",
+  "mab:production": "#2DD4BF",
+  "mab:efficiency": "#065F46",
+  "linucb:balanced": "#7C3AED",
+  "linucb:production": "#C4B5FD",
+  "linucb:efficiency": "#4C1D95",
+  "qlearning:balanced": "#E11D48",
+  "qlearning:production": "#FB7185",
+  "qlearning:efficiency": "#881337",
+};
+
+export function runColor(run: Run): string {
+  return RUN_COLORS[runKey(run)] ?? "#888";
 }
 
 export interface ExperimentDetail extends Experiment {
@@ -103,7 +159,8 @@ export async function createExperiment(config: {
   interactive?: boolean;
   wearRateSpread?: number;
   allowDegenerateWear?: boolean;
-  agents: { type: string; hyperparams: Record<string, number> }[];
+  perWorkareaMode?: boolean;
+  agents: { type: string; hyperparams: Record<string, number>; rewardProfile?: RewardProfile }[];
 }): Promise<{ id: number }> {
   const res = await fetch(`${BASE}/experiments`, {
     method: "POST",

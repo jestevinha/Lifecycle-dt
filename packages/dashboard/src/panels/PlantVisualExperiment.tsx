@@ -13,21 +13,11 @@ import {
   fetchKpiSteps,
   kpiStepsToSimSteps,
   hasFullKpiData,
+  runLabel,
+  runColor,
 } from "../api";
 import type { Run, Episode, SimKpiStep } from "../api";
 import { PlantVisualPanel } from "./PlantVisualPanel";
-
-const AGENT_LABELS: Record<string, string> = {
-  mab: "MAB",
-  linucb: "LinUCB",
-  qlearning: "Q-Learning",
-};
-
-const AGENT_COLORS: Record<string, string> = {
-  mab: "#0D9488",
-  linucb: "#7C3AED",
-  qlearning: "#E11D48",
-};
 
 interface Props {
   experimentId: number;
@@ -143,11 +133,11 @@ export function PlantVisualExperiment({ experimentId }: Props) {
                 }`}
                 style={
                   selectedRunId === run.id
-                    ? { backgroundColor: AGENT_COLORS[run.agent_type] ?? "#888" }
+                    ? { backgroundColor: runColor(run) }
                     : undefined
                 }
               >
-                {AGENT_LABELS[run.agent_type] ?? run.agent_type}
+                {runLabel(run)}
               </button>
             ))}
           </div>

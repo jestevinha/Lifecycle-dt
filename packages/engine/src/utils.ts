@@ -38,16 +38,32 @@ export function createRng(seed?: number | null): () => number {
  * so the tie-break stays reproducible from `simSeed`, consistent with
  * Known-Bugs-Fixed #12.
  */
+/**
+ * NaN-safe: `NaN > x` and `NaN === x` are both always `false` (even for two
+ * NaNs), so seeding `bestValue = values[0]` and only ever comparing against
+ * it silently freezes on index 0 forever once ANY numerical corruption
+ * (e.g. Known-Bugs-Fixed #18 — a stale cached feature vector one dimension
+ * short after growth, `dot()` reading `undefined`, `Math.max` broadcasting
+ * one NaN to every action) makes values[0] (or eventually all values) NaN —
+ * indistinguishable from genuine policy convergence in a reward chart. Skip
+ * NaN entries when tracking the best value instead; if every entry is NaN,
+ * there is no signal at all, so fall back to a uniform random index rather
+ * than silently favoring action 0.
+ */
 export function argmaxTieBreak(values: number[], rng: () => number): number {
-  let bestIndices: number[] = [0];
-  let bestValue = values[0];
-  for (let i = 1; i < values.length; i++) {
+  let bestIndices: number[] = [];
+  let bestValue = -Infinity;
+  for (let i = 0; i < values.length; i++) {
+    if (Number.isNaN(values[i])) continue;
     if (values[i] > bestValue) {
       bestValue = values[i];
       bestIndices = [i];
     } else if (values[i] === bestValue) {
       bestIndices.push(i);
     }
+  }
+  if (bestIndices.length === 0) {
+    return Math.floor(rng() * values.length);
   }
   return bestIndices.length === 1
     ? bestIndices[0]

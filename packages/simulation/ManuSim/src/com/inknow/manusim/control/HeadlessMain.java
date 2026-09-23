@@ -131,6 +131,10 @@ public class HeadlessMain {
             if (seed != Long.MIN_VALUE) Weather.setSeed(seed);
             ContextModel context = (seed == Long.MIN_VALUE ? new ContextModel(null) : new ContextModel(null, seed));
             PlantModel plant = new PlantModel(null);
+            // This loop sets currRate itself, per-workarea, on every single step (below) —
+            // PlantModel's own per-shift setCurrRate broadcast must be disabled or it would
+            // silently overwrite distinct per-workarea rates with one scalar every 8th step.
+            plant.setExternalRateControl(true);
 
             // Reseed Unit B accident RNGs from the episode seed so accident counts vary
             // per episode. Without this, each Unit B uses its construction-time seed
@@ -182,10 +186,20 @@ public class HeadlessMain {
             int[] maintCountdown = new int[plant.getWorkareas().size()];
 
             try {
+                int numWorkareas = plant.getWorkareas().size();
                 for (int step = 0; step < steps; step++) {
                     // 1. Read command from stdin
-                    //    Format: "rate" or "rate MAINT waIndex"
-                    //    MAINT triggers preventive maintenance (wear reset) on workarea[waIndex]
+                    //    Format: "rate" or "rate MAINT waIndex[,waIndex...]" (plant-wide,
+                    //    one rate for every workarea) — OR, for per-workarea rate control
+                    //    (2026-09-20): "r0,r1,...,r15" or "r0,r1,...,r15 MAINT wa..."
+                    //    (comma-separated, one rate per workarea, length must equal
+                    //    numWorkareas). The two rate forms are distinguished by whether the
+                    //    first token contains a comma — no separate mode flag needed on
+                    //    this side. MAINT triggers preventive maintenance (wear reset) on
+                    //    every listed workarea — comma-separated for more than one
+                    //    (2026-09-21, multi-target maintenance — see
+                    //    Per-Workarea-Rate-Control.md in the vault), single value for one,
+                    //    same as before.
                     String line;
                     try {
                         line = stdinReader.readLine();
@@ -194,18 +208,24 @@ public class HeadlessMain {
                     }
                     if (line == null) break; // EOF
 
-                    double rate;
-                    int maintIdx = -1; // -1 = no maintenance
+                    double rate = 0.0;          // plant-wide rate, used when ratesPerWorkarea == null
+                    double[] ratesPerWorkarea = null;
+                    int[] maintIdxs = null; // null = no maintenance this step
 
                     String trimmed = line.trim();
+                    String rateToken = trimmed;
                     if (trimmed.contains("MAINT")) {
                         String[] parts = trimmed.split("\\s+");
                         try {
-                            rate = Double.parseDouble(parts[0]);
-                            // Find MAINT keyword and the workarea index after it
+                            rateToken = parts[0];
+                            // Find MAINT keyword and the comma-separated indices after it
                             for (int p = 0; p < parts.length - 1; p++) {
                                 if ("MAINT".equals(parts[p])) {
-                                    maintIdx = Integer.parseInt(parts[p + 1]);
+                                    String[] idxStrs = parts[p + 1].split(",");
+                                    maintIdxs = new int[idxStrs.length];
+                                    for (int m = 0; m < idxStrs.length; m++) {
+                                        maintIdxs[m] = Integer.parseInt(idxStrs[m]);
+                                    }
                                     break;
                                 }
                             }
@@ -213,32 +233,53 @@ public class HeadlessMain {
                             System.err.println("[HeadlessMain] Invalid MAINT command: " + line);
                             break;
                         }
-                    } else {
-                        try {
-                            rate = Double.parseDouble(trimmed);
-                        } catch (NumberFormatException e) {
-                            System.err.println("[HeadlessMain] Invalid rate on stdin: " + line);
-                            break;
+                    }
+                    try {
+                        if (rateToken.indexOf(',') >= 0) {
+                            String[] rateStrs = rateToken.split(",");
+                            if (rateStrs.length != numWorkareas) {
+                                System.err.println("[HeadlessMain] Per-workarea rate command has " + rateStrs.length
+                                        + " values, expected " + numWorkareas + ": " + line);
+                                break;
+                            }
+                            ratesPerWorkarea = new double[numWorkareas];
+                            for (int wa = 0; wa < numWorkareas; wa++) {
+                                ratesPerWorkarea[wa] = Double.parseDouble(rateStrs[wa]);
+                            }
+                        } else {
+                            rate = Double.parseDouble(rateToken);
+                        }
+                    } catch (NumberFormatException e) {
+                        System.err.println("[HeadlessMain] Invalid rate on stdin: " + line);
+                        break;
+                    }
+
+                    // 2. Handle preventive maintenance: reset wear and take EVERY
+                    //    listed target workarea offline for a full shift
+                    //    (STATUS_MAINTENANCE) — one or many, no cap enforced here;
+                    //    the caller (HeadlessMain's TS-side driver) decides how many
+                    //    workareas to target in one shift.
+                    if (maintIdxs != null) {
+                        for (int maintIdx : maintIdxs) {
+                            if (maintIdx >= 0 && maintIdx < numWorkareas) {
+                                plant.getWorkareas().get(maintIdx).getUnitC().setWearStatus(0.0);
+                                plant.getWorkareas().get(maintIdx).setStatus(Const.STATUS_MAINTENANCE);
+                                maintCountdown[maintIdx] = stepsPerShift;
+                            }
                         }
                     }
 
-                    // 2. Handle preventive maintenance: reset wear and take the
-                    //    target workarea offline for a full shift (STATUS_MAINTENANCE).
-                    if (maintIdx >= 0 && maintIdx < plant.getWorkareas().size()) {
-                        plant.getWorkareas().get(maintIdx).getUnitC().setWearStatus(0.0);
-                        plant.getWorkareas().get(maintIdx).setStatus(Const.STATUS_MAINTENANCE);
-                        maintCountdown[maintIdx] = stepsPerShift;
+                    // 3. Apply rate (plant-wide or per-workarea) to all workareas EXCEPT
+                    //    those currently under maintenance, which are held offline
+                    //    (rate 0) until their shift-long countdown elapses.
+                    if (ratesPerWorkarea == null) {
+                        plant.setSetPointRate(rate);
                     }
-
-                    // 3. Apply rate to all workareas EXCEPT those currently under
-                    //    maintenance, which are held offline (rate 0) until their
-                    //    shift-long countdown elapses.
-                    plant.setSetPointRate(rate);
-                    for (int wa = 0; wa < plant.getWorkareas().size(); wa++) {
+                    for (int wa = 0; wa < numWorkareas; wa++) {
                         if (maintCountdown[wa] > 0) {
                             plant.getWorkareas().get(wa).setCurrRate(0.0);
                         } else {
-                            plant.getWorkareas().get(wa).setCurrRate(rate);
+                            plant.getWorkareas().get(wa).setCurrRate(ratesPerWorkarea != null ? ratesPerWorkarea[wa] : rate);
                         }
                     }
 

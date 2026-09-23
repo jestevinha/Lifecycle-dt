@@ -1,15 +1,10 @@
 import { useEffect, useState } from "react";
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
-import { fetchExperiment, fetchEpisodes } from "../api";
+import { fetchExperiment, fetchEpisodes, runKey, runLabel, runColor } from "../api";
 import type { Episode, Run } from "../api";
-
-const AGENT_COLORS: Record<string, string> = {
-  mab: "#0D9488",
-  linucb: "#7C3AED",
-  qlearning: "#E11D48",
-};
+import { RunLegend } from "./RunLegend";
 
 interface ChartPoint {
   episode: number;
@@ -29,38 +24,38 @@ function rollingAvg(arr: number[], window: number): number[] {
 export function LearningCurves({ experimentId }: { experimentId: number }) {
   const [data, setData] = useState<ChartPoint[]>([]);
   const [energyData, setEnergyData] = useState<ChartPoint[]>([]);
-  const [agents, setAgents] = useState<string[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const exp = await fetchExperiment(experimentId);
-      const runs: Run[] = exp.runs ?? [];
-      if (runs.length === 0) return;
+      const expRuns: Run[] = exp.runs ?? [];
+      if (expRuns.length === 0) return;
 
-      const agentNames = runs.map((r) => r.agent_type);
-      const episodesByAgent: Record<string, Episode[]> = {};
+      const episodesByRun: Record<string, Episode[]> = {};
 
       await Promise.all(
-        runs.map(async (run) => {
-          episodesByAgent[run.agent_type] = await fetchEpisodes(run.id);
+        expRuns.map(async (run) => {
+          episodesByRun[runKey(run)] = await fetchEpisodes(run.id);
         }),
       );
 
       if (cancelled) return;
 
       const maxEp = Math.max(
-        ...Object.values(episodesByAgent).map((eps) => eps.length),
+        ...Object.values(episodesByRun).map((eps) => eps.length),
       );
 
       // Compute rolling averages for reward
-      const avgByAgent: Record<string, number[]> = {};
-      const energyAvgByAgent: Record<string, number[]> = {};
-      for (const agent of agentNames) {
-        const rewards = episodesByAgent[agent]?.map((e) => e.reward) ?? [];
-        avgByAgent[agent] = rollingAvg(rewards, 5);
-        const energies = episodesByAgent[agent]?.map((e) => e.energy_per_part ?? 0) ?? [];
-        energyAvgByAgent[agent] = rollingAvg(energies, 5);
+      const avgByRun: Record<string, number[]> = {};
+      const energyAvgByRun: Record<string, number[]> = {};
+      for (const run of expRuns) {
+        const key = runKey(run);
+        const rewards = episodesByRun[key]?.map((e) => e.reward) ?? [];
+        avgByRun[key] = rollingAvg(rewards, 5);
+        const energies = episodesByRun[key]?.map((e) => e.energy_per_part ?? 0) ?? [];
+        energyAvgByRun[key] = rollingAvg(energies, 5);
       }
 
       const points: ChartPoint[] = [];
@@ -68,17 +63,18 @@ export function LearningCurves({ experimentId }: { experimentId: number }) {
       for (let i = 0; i < maxEp; i++) {
         const point: ChartPoint = { episode: i };
         const ePoint: ChartPoint = { episode: i };
-        for (const agent of agentNames) {
-          point[agent] = episodesByAgent[agent]?.[i]?.reward ?? 0;
-          point[`${agent}_avg`] = avgByAgent[agent]?.[i] ?? 0;
-          ePoint[agent] = episodesByAgent[agent]?.[i]?.energy_per_part ?? 0;
-          ePoint[`${agent}_avg`] = energyAvgByAgent[agent]?.[i] ?? 0;
+        for (const run of expRuns) {
+          const key = runKey(run);
+          point[key] = episodesByRun[key]?.[i]?.reward ?? 0;
+          point[`${key}_avg`] = avgByRun[key]?.[i] ?? 0;
+          ePoint[key] = episodesByRun[key]?.[i]?.energy_per_part ?? 0;
+          ePoint[`${key}_avg`] = energyAvgByRun[key]?.[i] ?? 0;
         }
         points.push(point);
         ePoints.push(ePoint);
       }
 
-      setAgents(agentNames);
+      setRuns(expRuns);
       setData(points);
       setEnergyData(ePoints);
     })();
@@ -89,7 +85,8 @@ export function LearningCurves({ experimentId }: { experimentId: number }) {
 
   return (
     <section className="rounded-2xl bg-gray-900 p-6">
-      <h2 className="mb-4 text-lg font-semibold text-gray-100">Learning Curves</h2>
+      <h2 className="mb-2 text-lg font-semibold text-gray-100">Learning Curves</h2>
+      <RunLegend runs={runs} />
       <ResponsiveContainer width="100%" height={360}>
         <LineChart data={data} margin={{ top: 5, right: 20, bottom: 25, left: 10 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -107,26 +104,25 @@ export function LearningCurves({ experimentId }: { experimentId: number }) {
             labelStyle={{ color: "#D1D5DB" }}
             formatter={(value: number) => Number(value.toFixed(2))}
           />
-          <Legend verticalAlign="top" height={36} />
-          {agents.map((agent) => (
+          {runs.map((run) => (
             <Line
-              key={agent}
+              key={runKey(run)}
               type="monotone"
-              dataKey={agent}
-              name={`${agent} (raw)`}
-              stroke={AGENT_COLORS[agent] ?? "#888"}
+              dataKey={runKey(run)}
+              name={`${runLabel(run)} (raw)`}
+              stroke={runColor(run)}
               strokeOpacity={0.25}
               dot={false}
               strokeWidth={1}
             />
           ))}
-          {agents.map((agent) => (
+          {runs.map((run) => (
             <Line
-              key={`${agent}_avg`}
+              key={`${runKey(run)}_avg`}
               type="monotone"
-              dataKey={`${agent}_avg`}
-              name={`${agent} (avg5)`}
-              stroke={AGENT_COLORS[agent] ?? "#888"}
+              dataKey={`${runKey(run)}_avg`}
+              name={`${runLabel(run)} (avg5)`}
+              stroke={runColor(run)}
               dot={false}
               strokeWidth={2}
             />
@@ -136,7 +132,7 @@ export function LearningCurves({ experimentId }: { experimentId: number }) {
 
       {energyData.length > 0 && (
         <>
-          <h2 className="mb-4 mt-8 text-lg font-semibold text-gray-100">
+          <h2 className="mb-2 mt-8 text-lg font-semibold text-gray-100">
             Energy Efficiency (kWh/part)
           </h2>
           <ResponsiveContainer width="100%" height={360}>
@@ -156,26 +152,25 @@ export function LearningCurves({ experimentId }: { experimentId: number }) {
                 labelStyle={{ color: "#D1D5DB" }}
                 formatter={(value: number) => Number(value.toFixed(4))}
               />
-              <Legend verticalAlign="top" height={36} />
-              {agents.map((agent) => (
+              {runs.map((run) => (
                 <Line
-                  key={agent}
+                  key={runKey(run)}
                   type="monotone"
-                  dataKey={agent}
-                  name={`${agent} (raw)`}
-                  stroke={AGENT_COLORS[agent] ?? "#888"}
+                  dataKey={runKey(run)}
+                  name={`${runLabel(run)} (raw)`}
+                  stroke={runColor(run)}
                   strokeOpacity={0.25}
                   dot={false}
                   strokeWidth={1}
                 />
               ))}
-              {agents.map((agent) => (
+              {runs.map((run) => (
                 <Line
-                  key={`${agent}_avg`}
+                  key={`${runKey(run)}_avg`}
                   type="monotone"
-                  dataKey={`${agent}_avg`}
-                  name={`${agent} (avg5)`}
-                  stroke={AGENT_COLORS[agent] ?? "#888"}
+                  dataKey={`${runKey(run)}_avg`}
+                  name={`${runLabel(run)} (avg5)`}
+                  stroke={runColor(run)}
                   dot={false}
                   strokeWidth={2}
                 />

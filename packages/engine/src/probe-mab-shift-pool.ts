@@ -24,7 +24,7 @@
 
 import fs from "node:fs";
 import { runInteractiveSimulation, type StepCommand } from "./runner.js";
-import { ACTIONS, STEPS_PER_SHIFT, shouldTriggerMaintenance } from "./actions.js";
+import { ACTIONS, STEPS_PER_SHIFT } from "./actions.js";
 import {
   WEAR_THRESHOLD, THROUGHPUT_WEIGHT,
   computeStepReward, aggregateShiftReward, maintenancePenalty,
@@ -55,7 +55,7 @@ function resolveMaint(actionId: number, prevWear: number[]): {
     ? 0
     : prevWear.reduce((best, w, idx) => (w < WEAR_THRESHOLD && w > prevWear[best] ? idx : best), firstEligible);
   const maxWearFrac = firstEligible >= 0 ? prevWear[maxIdx] / WEAR_THRESHOLD : 0;
-  if (firstEligible >= 0 && prevWear[maxIdx] > 0 && shouldTriggerMaintenance(actionId, maxWearFrac)) {
+  if (firstEligible >= 0 && prevWear[maxIdx] > 0 && ACTIONS[actionId].maintainNow) {
     return { cmd: { rate, maintainWorkarea: maxIdx }, maintFired: true, preWearFrac: maxWearFrac };
   }
   return { cmd: rate, maintFired: false, preWearFrac: 0 };

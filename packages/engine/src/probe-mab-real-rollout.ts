@@ -22,7 +22,7 @@
 
 import fs from "node:fs";
 import { runInteractiveSimulation, type StepCommand } from "./runner.js";
-import { ACTIONS, STEPS_PER_SHIFT, shouldTriggerMaintenance } from "./actions.js";
+import { ACTIONS, STEPS_PER_SHIFT } from "./actions.js";
 import {
   WEAR_THRESHOLD, computeStepReward, aggregateShiftReward, maintenancePenalty, extractState,
   type StepRewardComponents,
@@ -64,7 +64,7 @@ async function realEpisode(agent: MABAgent, seed: number, prevState: State): Pro
       ? 0
       : prevWear.reduce((best, w, idx) => (w < WEAR_THRESHOLD && w > prevWear[best] ? idx : best), firstEligible);
     const maxWearFrac = prevWear.length > 0 && firstEligible >= 0 ? prevWear[maxIdx] / WEAR_THRESHOLD : 0;
-    if (firstEligible >= 0 && prevWear[maxIdx] > 0 && shouldTriggerMaintenance(currentActionId, maxWearFrac)) {
+    if (firstEligible >= 0 && prevWear[maxIdx] > 0 && ACTIONS[currentActionId].maintainNow) {
       maintTarget = maxIdx; preMaintWearFrac = maxWearFrac;
       return { rate: shiftRate, maintainWorkarea: maintTarget };
     }

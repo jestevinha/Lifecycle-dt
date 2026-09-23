@@ -70,10 +70,24 @@ export interface InteractiveSimOptions {
   wearRateSpread?: number;
 }
 
-/** Command sent to Java each step — either a plain rate or rate + maintenance target */
+/**
+ * Command sent to Java each step — a plain rate (plant-wide, applied to every
+ * workarea) or a per-workarea array of 16 rates (2026-09-20, per-workarea
+ * rate control — see Parameter-Sharing-Across-Actions.md / the per-workarea
+ * agent mode note in the vault), optionally with a maintenance target.
+ * `HeadlessMain.java` distinguishes the two on the wire by whether the rate
+ * token contains a comma — no separate protocol flag needed.
+ */
 export interface StepCommand {
-  rate: number;
-  maintainWorkarea?: number;  // 0-15: workarea index to trigger preventive maintenance on
+  rate: number | number[];
+  /**
+   * Workarea index (or indices, 2026-09-21 — multi-target maintenance, see
+   * Per-Workarea-Rate-Control.md in the vault) to trigger preventive
+   * maintenance on this step. `HeadlessMain.java` applies the SAME reset to
+   * every listed workarea, no cap enforced on the Java side — the caller
+   * decides how many to target in one shift.
+   */
+  maintainWorkarea?: number | number[];
 }
 
 export interface StepCallback {
@@ -87,9 +101,15 @@ export interface StepCallback {
 /** Serialize a StepCommand to the Java stdin protocol line */
 function formatCommand(cmd: number | StepCommand): string {
   if (typeof cmd === "number") return cmd.toFixed(4);
-  const base = cmd.rate.toFixed(4);
-  if (cmd.maintainWorkarea != null && cmd.maintainWorkarea >= 0) {
-    return `${base} MAINT ${cmd.maintainWorkarea}`;
+  const base = Array.isArray(cmd.rate)
+    ? cmd.rate.map(r => r.toFixed(4)).join(",")
+    : cmd.rate.toFixed(4);
+  if (cmd.maintainWorkarea != null) {
+    const targets = Array.isArray(cmd.maintainWorkarea) ? cmd.maintainWorkarea : [cmd.maintainWorkarea];
+    const valid = targets.filter(t => t >= 0);
+    if (valid.length > 0) {
+      return `${base} MAINT ${valid.join(",")}`;
+    }
   }
   return base;
 }

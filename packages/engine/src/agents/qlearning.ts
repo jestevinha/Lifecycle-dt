@@ -2,19 +2,55 @@ import type { Agent } from "./types.js";
 import type { State } from "../types.js";
 import { ACTIONS } from "../actions.js";
 import { createRng, argmaxTieBreak } from "../utils.js";
+import { stateActionToVector } from "../featurize.js";
 
 /**
- * Tabular Q-Learning agent.
- * Discretizes the continuous state space into bins.
+ * Q-Learning with linear function approximation (semi-gradient TD),
+ * SHARED across actions (2026-09-20 — parameter sharing, see Known-Bugs-Fixed
+ * / the vault note this motivated).
+ *
+ * Q(s,a) is now `theta · x(s,a)`, ONE shared weight vector over a joint
+ * state-action feature vector (`stateActionToVector`, featurize.ts) — not one
+ * row per action id (that was the previous design, 2026-09-19). The previous
+ * per-action design couldn't generalize across actions at all (each of the
+ * 10 rate×maintenance combinations was learned from scratch, independently,
+ * exactly like a non-contextual bandit would per arm), which made widening
+ * the action grid for finer control directly costly in sample count. Folding
+ * the action's own parameters (rate, maintainNow) into the feature vector
+ * lets one shared fit cover the whole grid, including rates rarely sampled
+ * directly — the actual point of function approximation. See
+ * `stateActionToVector`'s own comment for why the maintainNow×wear
+ * interaction terms are load-bearing, not optional: a plain concatenation of
+ * state and action features can only represent their SUM, which cannot
+ * express "maintaining matters more when wear is high."
+ *
+ * LinUCB fits the same joint features as a single-shot linear bandit (no
+ * bootstrap); this agent still does genuine γ-discounted TD bootstrapping
+ * (`target = r + γ·max_a' theta·x(s',a')`) — Q-Learning's defining trait,
+ * preserved across this redesign same as the previous one.
  */
 export class QLearningAgent implements Agent {
-  private qTable: Map<string, number[]>;
+  /** theta = ONE shared weight vector over joint (state, action) features. */
+  private readonly theta: number[];
+  private d: number;
+  /** Global update count, used only when `useConstantAlpha` is false. */
+  private updateCount = 0;
   private epsilon: number;
   private readonly epsilonDecay: number;
   private readonly epsilonMin: number;
   private readonly alpha: number;
   private readonly gamma: number;
-  private lastStateKey: string | null = null;
+  /**
+   * Update rule selector, mirroring MABAgent's useConstantAlpha convention.
+   * - false (default): decaying α_t = α_0 / (1 + updateCount) — now a single
+   *   global counter (there is only one shared model left to decay), unlike
+   *   the pre-sharing per-action counter this replaces.
+   * - true: constant-α, every update nudges theta by up to α_0 regardless of
+   *   how many updates have happened; kept for comparison.
+   */
+  private readonly useConstantAlpha: boolean;
+  /** Joint feature vector x(s,a) for the action selectAction actually chose. */
+  private lastFeatures: number[] | null = null;
   /**
    * Seeded exploration RNG (Known-Bugs-Fixed #12). Deterministic when `seed`
    * is provided (typically `config.simSeed`), falls back to `Math.random`
@@ -22,59 +58,98 @@ export class QLearningAgent implements Agent {
    */
   private readonly rng: () => number;
 
+  // alpha default lowered again 0.02→0.002 (2026-09-21, exp 71, per-workarea
+  // mode) — see packages/dashboard/src/App.tsx AGENT_DEFAULTS.qlearning for
+  // the full rationale (16 updates/shift into the same shared model in
+  // per-workarea mode, ~16× the perturbation rate α=0.02 was tuned against).
   constructor(
-    alpha = 0.1,
+    alpha = 0.002,
     gamma = 0.95,
     epsilon = 1.0,
     epsilonDecay = 0.99,
     epsilonMin = 0.01,
     seed?: number,
+    useConstantAlpha = false,
   ) {
     this.alpha = alpha;
     this.gamma = gamma;
     this.epsilon = epsilon;
     this.epsilonDecay = epsilonDecay;
     this.epsilonMin = epsilonMin;
+    this.useConstantAlpha = useConstantAlpha;
     this.rng = createRng(seed);
-    this.qTable = new Map();
+    // 10 (5 state + 3 action + 2 interaction) grows to 11 once maxWearFraction
+    // appears (interactive mode) — see ensureDim.
+    this.d = 10;
+    this.theta = new Array(this.d).fill(0);
+    console.log(`[QLearningAgent] shared-params linear-approx updateRule=${useConstantAlpha ? `constant-α(${alpha})` : `decaying-α(${alpha}/(1+n))`} seed=${seed ?? "unseeded"}`);
   }
 
   selectAction(state: State): number {
-    const key = this.discretize(state);
-    this.lastStateKey = key;
+    const featuresByAction = ACTIONS.map(a => stateActionToVector(state, a));
+    for (const x of featuresByAction) this.ensureDim(x.length);
 
     if (this.rng() < this.epsilon) {
-      return Math.floor(this.rng() * ACTIONS.length);
+      const action = Math.floor(this.rng() * ACTIONS.length);
+      this.lastFeatures = featuresByAction[action];
+      return action;
     }
 
-    const qValues = this.getQ(key);
-    // Known-Bugs-Fixed #17 (fixed 2026-09-12): random tie-break instead of
-    // always favoring the lowest action id among tied (usually zero-initialized,
-    // under-sampled) Q-values.
-    return argmaxTieBreak(qValues, this.rng);
+    const qValues = featuresByAction.map(x => dot(this.theta, x));
+    const action = argmaxTieBreak(qValues, this.rng);
+    this.lastFeatures = featuresByAction[action];
+    return action;
   }
 
-  update(action: number, reward: number, _prevState: State, nextState: State, done = false): void {
-    if (!this.lastStateKey) return;
+  // `action` is unused now: `lastFeatures` already encodes which action was
+  // chosen (its joint state-action vector), since there's no per-action
+  // `theta[action]` row left to index into. Kept in the signature for
+  // `Agent` interface compliance and parity with the other two agents.
+  update(_action: number, reward: number, _prevState: State, nextState: State, done = false): void {
+    if (!this.lastFeatures) return;
+    const x = this.lastFeatures;
 
-    // Canonical Q-Learning TD update with the γ·max_a Q[s′,a] bootstrap.
-    // `lastStateKey` is s (set by the selectAction that chose `action`) — _prevState
-    // documents intent but is not re-read; lastStateKey is the authoritative s key.
-    // `nextState` is s′ observed at the shift boundary. On the terminal shift
-    // there is no successor, so the bootstrap term is dropped (reward only).
-    const q = this.getQ(this.lastStateKey);
-    const futureValue = done ? 0 : this.peekMaxQ(this.discretize(nextState));
+    // Canonical Q-Learning TD target with the γ·max_a Q[s′,a] bootstrap, Q
+    // now read off the shared linear model instead of a per-action one.
+    // `lastFeatures` is x(s,a) for the action selectAction chose — _prevState
+    // documents intent but is not re-read, matching the prior convention.
+    const nextFeaturesByAction = ACTIONS.map(a => stateActionToVector(nextState, a));
+    for (const xNext of nextFeaturesByAction) this.ensureDim(xNext.length);
+    const futureValue = done ? 0 : Math.max(...nextFeaturesByAction.map(xNext => dot(this.theta, xNext)));
     const target = reward + this.gamma * futureValue;
-    q[action] += this.alpha * (target - q[action]);
-    this.qTable.set(this.lastStateKey, q);
+
+    const tdError = target - dot(this.theta, x);
+    const alpha = this.useConstantAlpha ? this.alpha : this.nextAlpha();
+    for (let i = 0; i < x.length; i++) {
+      this.theta[i] += alpha * tdError * x[i];
+    }
     // NOTE: epsilon decay moved to decayEpsilon() — call once per episode
   }
 
-  /** Max Q-value of a state, treating an unseen state as 0 WITHOUT creating an
-   *  entry (so the bootstrap doesn't inflate the reported Q-table size). */
-  private peekMaxQ(key: string): number {
-    const q = this.qTable.get(key);
-    return q ? Math.max(...q) : 0;
+  /** Decaying α_t = α_0 / (1 + updateCount); increments the count as a side effect. */
+  private nextAlpha(): number {
+    const alpha = this.alpha / (1 + this.updateCount);
+    this.updateCount++;
+    return alpha;
+  }
+
+  /**
+   * Grow theta (and, if pending, lastFeatures) if the joint feature vector
+   * gained a dimension (10 → 11, once `maxWearFraction` first appears in
+   * interactive mode) — the shared-model equivalent of the per-row padding
+   * this replaced. Keeping `lastFeatures` in sync with `theta`'s length here
+   * is what prevents the NaN cascade documented in Known-Bugs-Fixed #21
+   * (`dot()` reading `undefined` off a stale shorter array, then `Math.max`
+   * broadcasting that single NaN into every future TD target) — same failure
+   * mode, now guarded the same way for a flat vector instead of per-row.
+   */
+  private ensureDim(newD: number): void {
+    if (newD <= this.d) return;
+    for (let i = this.d; i < newD; i++) this.theta.push(0);
+    if (this.lastFeatures) {
+      for (let i = this.d; i < newD; i++) this.lastFeatures.push(0);
+    }
+    this.d = newD;
   }
 
   /** Decay epsilon once per episode (not per update). */
@@ -89,51 +164,19 @@ export class QLearningAgent implements Agent {
   getEpsilonDecay(): number {
     return this.epsilonDecay;
   }
+}
 
-  get qTableSize(): number {
-    return this.qTable.size;
-  }
-
-  getStateSize(): number {
-    return this.qTable.size;
-  }
-
-  private getQ(key: string): number[] {
-    if (!this.qTable.has(key)) {
-      this.qTable.set(key, new Array(ACTIONS.length).fill(0));
-    }
-    return this.qTable.get(key)!;
-  }
-
-  private discretize(s: State): string {
-    const bins = [
-      s.ambTemperature < 15 ? 0 : s.ambTemperature <= 25 ? 1 : 2,
-      s.rawMaterialQuality < 0.4 ? 0 : s.rawMaterialQuality <= 0.7 ? 1 : 2,
-      s.stepNorm < 0.33 ? 0 : s.stepNorm <= 0.66 ? 1 : 2,
-      // shiftPhaseNorm is exactly {0, 0.5, 1.0} → bins {0, 1, 2}
-      s.shiftPhaseNorm < 0.33 ? 0 : s.shiftPhaseNorm <= 0.66 ? 1 : 2,
-      // numberAccidents is shift-scoped as of Known-Bugs-Fixed #15 (fixed
-      // 2026-09-11): accidents during the shift just completed, reset every
-      // shift by the caller (experiments.ts) — not the episode-cumulative
-      // total. These {0, 1-2, ≥3} bins were always sized for a per-shift
-      // count; the bug was that a monotonically-growing cumulative value was
-      // being fed in, saturating bin 2 permanently within the first few
-      // shifts of every episode. No bin-threshold change needed here.
-      s.numberAccidents === 0 ? 0 : s.numberAccidents <= 2 ? 1 : 2,
-    ];
-    if (s.maxWearFraction !== undefined) {
-      // Six bins, concentrated in the decision-relevant 0.5–0.95 region so the
-      // agent can distinguish "maintain now" from "wait another shift".
-      const w = s.maxWearFraction;
-      let bin: number;
-      if      (w < 0.30) bin = 0;
-      else if (w < 0.50) bin = 1;
-      else if (w < 0.70) bin = 2;
-      else if (w < 0.85) bin = 3;
-      else if (w < 0.95) bin = 4;
-      else               bin = 5;
-      bins.push(bin);
-    }
-    return bins.join(",");
-  }
+/**
+ * Iterates `min(a.length, b.length)`, not `a.length` — a length mismatch
+ * (e.g. theta grown by `ensureDim` one call before a stale `x` is) must never
+ * read `undefined` off the shorter array: `0 * undefined` is `NaN`, and
+ * `Math.max` in `futureValue` propagates a single such NaN to poison every
+ * future TD target. `ensureDim` keeps `lastFeatures` in sync too, so this is
+ * belt-and-suspenders (see Known-Bugs-Fixed #21).
+ */
+function dot(a: number[], b: number[]): number {
+  let s = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) s += a[i] * b[i];
+  return s;
 }

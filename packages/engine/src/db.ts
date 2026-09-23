@@ -106,6 +106,14 @@ function migrate(db: Database.Database): void {
   if (!epCols6.some((c) => c.name === "execution_mode")) {
     db.exec("ALTER TABLE episodes ADD COLUMN execution_mode TEXT");
   }
+
+  // v7: reward_profile on runs — which reward-shaping goal ("balanced" |
+  // "production" | "efficiency") this run trained under. NULL on pre-existing
+  // rows means "balanced" (the only profile that existed before this column).
+  const runCols7 = db.prepare("PRAGMA table_info(runs)").all() as { name: string }[];
+  if (!runCols7.some((c) => c.name === "reward_profile")) {
+    db.exec("ALTER TABLE runs ADD COLUMN reward_profile TEXT");
+  }
 }
 
 export function closeDb(): void {

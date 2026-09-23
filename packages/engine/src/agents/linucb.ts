@@ -1,47 +1,74 @@
 import type { Agent } from "./types.js";
 import type { State } from "../types.js";
 import { ACTIONS } from "../actions.js";
+import { stateActionToVector } from "../featurize.js";
 
 /**
- * LinUCB Contextual Bandit.
- * Uses a linear model per action with upper confidence bound exploration.
- * Automatically adapts to 5-dim or 6-dim state vectors.
+ * LinUCB Contextual Bandit, SHARED across actions (2026-09-20 — parameter
+ * sharing, see Known-Bugs-Fixed / the vault note this motivated).
+ *
+ * `A`/`b` are now ONE shared ridge-regression fit over a joint state-action
+ * feature vector (`stateActionToVector`, featurize.ts), not one independent
+ * `(A[a], b[a])` per action id (that was the previous design, 2026-09-19).
+ * The previous per-action design was actually the *disjoint* special case of
+ * LinUCB — the original algorithm (Li et al. 2010) already supports a
+ * "hybrid" shared component alongside per-arm features for exactly this
+ * reason; this collapses fully to the shared/hybrid form since every
+ * discrete action here is really a point in a small continuous (rate,
+ * maintainNow) space, not an unrelated arm like a news article. One shared
+ * fit means the confidence bound and the point estimate both benefit from
+ * every episode's data regardless of which action was taken, instead of only
+ * updating the one row for the action actually chosen.
  */
 export class LinUCBAgent implements Agent {
   private readonly alpha: number;
   private d: number;
-  private A: number[][][];
-  private b: number[][];
+  private A: number[][];
+  private b: number[];
   private episodeCount = 0;
 
+  // alpha=5.0 tested 2026-09-20 against the PREVIOUS per-action design,
+  // reverted — exp 63 showed it made the medium_maint_now lock-in MORE
+  // consistent, not less. Worth re-testing once this shared design has a
+  // baseline run of its own; the mechanism that made alpha ineffective
+  // (round-robin already giving a confident, not just uncertain, estimate)
+  // may or may not still apply once uncertainty is shared across actions
+  // too. See Known-Bugs-Fixed / Reward-Function-Evolution.md in the vault.
   constructor(alpha = 2.5) {
     this.alpha = alpha;
-    this.d = 5;
-    const k = ACTIONS.length;
-    this.A = [];
-    this.b = [];
-    for (let a = 0; a < k; a++) {
-      this.A.push(identity(this.d));
-      this.b.push(new Array(this.d).fill(0));
-    }
+    // 10 (5 state + 3 action + 2 interaction) grows to 11 once
+    // maxWearFraction appears (interactive mode) — see ensureDim.
+    this.d = 10;
+    this.A = identity(this.d);
+    this.b = new Array(this.d).fill(0);
   }
 
   selectAction(state: State): number {
-    // Round-robin: force each action once during the first K episodes
+    // Round-robin: force each action once during the first K episodes.
+    // Kept unchanged from the disjoint design for now — with a shared fit,
+    // every round-robin episode's data already informs every action's
+    // estimate via A/b, so this may be more coverage than strictly needed,
+    // but it's a safe, well-understood starting point (see the rollout plan
+    // in Reward-Function-Evolution.md / the vault note for this redesign).
     if (this.episodeCount < ACTIONS.length) {
       return this.episodeCount;
     }
 
-    const x = stateToVector(state);
-    this.ensureDim(x.length);
+    const featuresByAction = ACTIONS.map(a => stateActionToVector(state, a));
+    for (const x of featuresByAction) this.ensureDim(x.length);
+
+    // theta = A⁻¹b computed ONCE per decision now (shared), not once per
+    // action — cheaper than the disjoint design, not just structurally
+    // different.
+    const Ainv = invertMatrix(this.A);
+    const theta = matVecMul(Ainv, this.b);
 
     let bestAction = 0;
     let bestUCB = -Infinity;
     const diag: { a: number; name: string; exploit: number; explore: number; ucb: number }[] = [];
 
     for (let a = 0; a < ACTIONS.length; a++) {
-      const Ainv = invertMatrix(this.A[a]);
-      const theta = matVecMul(Ainv, this.b[a]);
+      const x = featuresByAction[a];
       const exploit = dotProduct(theta, x);
       const explore = this.alpha * Math.sqrt(dotProduct(x, matVecMul(Ainv, x)));
       const ucb = exploit + explore;
@@ -66,79 +93,49 @@ export class LinUCBAgent implements Agent {
   }
 
   update(action: number, reward: number, prevState: State, _nextState: State): void {
-    const x = stateToVector(prevState);  // decision-time context: x at the moment action was chosen
+    // decision-time context: x at the moment action was chosen
+    const x = stateActionToVector(prevState, ACTIONS[action]);
     this.ensureDim(x.length);
 
-    // A_a = A_a + x * x^T
+    // A = A + x·xᵀ  (shared — every action's update informs the same fit)
     for (let i = 0; i < this.d; i++) {
       for (let j = 0; j < this.d; j++) {
-        this.A[action][i][j] += x[i] * x[j];
+        this.A[i][j] += x[i] * x[j];
       }
     }
-    // b_a = b_a + r * x
+    // b = b + r·x
     for (let i = 0; i < this.d; i++) {
-      this.b[action][i] += reward * x[i];
+      this.b[i] += reward * x[i];
     }
   }
 
-  /** Grow A and b matrices if state vector gained a dimension (5 → 6) */
+  /**
+   * Grow A/b if the joint feature vector gained a dimension (10 → 11, once
+   * maxWearFraction first appears) — the shared-model equivalent of the
+   * previous per-action padding.
+   */
   private ensureDim(newD: number): void {
     if (newD <= this.d) return;
-    for (let a = 0; a < ACTIONS.length; a++) {
-      // Expand each row, then add new rows
-      for (let i = 0; i < this.d; i++) {
-        for (let j = this.d; j < newD; j++) {
-          this.A[a][i].push(0);
-        }
+    for (let i = 0; i < this.d; i++) {
+      for (let j = this.d; j < newD; j++) {
+        this.A[i].push(0);
       }
-      for (let i = this.d; i < newD; i++) {
-        const row = new Array(newD).fill(0);
-        row[i] = 1; // identity diagonal
-        this.A[a].push(row);
-      }
-      // Expand b vector
-      for (let i = this.d; i < newD; i++) {
-        this.b[a].push(0);
-      }
+    }
+    for (let i = this.d; i < newD; i++) {
+      const row = new Array(newD).fill(0);
+      row[i] = 1; // identity diagonal
+      this.A.push(row);
+    }
+    for (let i = this.d; i < newD; i++) {
+      this.b.push(0);
     }
     this.d = newD;
   }
 }
 
-// Fixed normalization ranges (anchored to Java constants in Const.java):
-//   ambTemperature:    [10, 30]  ← Const.TEMP_MIN / TEMP_MAX
-//   rawMaterialQuality:[0,  1]   ← Const.RAW_MAT_MIN_SPEC / RAW_MAT_MAX_SPEC
-//   stepNorm:          [0,  1]   ← already normalised by extractState
-//   shiftPhaseNorm:    [0,  1]   ← already in {0, 0.5, 1.0} ⊂ [0,1]
-//   numberAccidents:   [0, 10]   ← soft cap; SHIFT-SCOPED count (accidents during the
-//                                  shift just completed), not episode-cumulative — see
-//                                  Known-Bugs-Fixed #15 (fixed 2026-09-11). Before that
-//                                  fix this fed the raw episode-running total (up to
-//                                  ~6–48 by end of episode at very_high rate), which
-//                                  only ever grew and was collinear with stepNorm; the
-//                                  cap of 10 is generous headroom for a single shift
-//                                  and rarely binds now.
-//   maxWearFraction:   [0,  1]   ← already normalised by extractState (÷ WEAR_THRESHOLD)
-//
-// All constants are FIXED (not adaptive) — adaptive normalisation would break
-// the stationarity assumption of the linear bandit and reintroduce context drift.
-const TEMP_NORM_MIN = 10;
-const TEMP_NORM_MAX = 30;
-const ACC_NORM_MAX  = 10;  // shift-scoped accident cap; clipped, not wrapped
-
-function stateToVector(s: State): number[] {
-  const v = [
-    (s.ambTemperature - TEMP_NORM_MIN) / (TEMP_NORM_MAX - TEMP_NORM_MIN),
-    s.rawMaterialQuality,
-    s.stepNorm,
-    s.shiftPhaseNorm,
-    Math.min(s.numberAccidents / ACC_NORM_MAX, 1),
-  ];
-  if (s.maxWearFraction !== undefined) {
-    v.push(s.maxWearFraction);
-  }
-  return v;
-}
+// stateActionToVector moved to ../featurize.js (2026-09-19, extended
+// 2026-09-20 for shared parameters) — shared with Q-Learning's linear
+// function approximation so both agents see the same joint features.
 
 function identity(n: number): number[][] {
   const m: number[][] = [];

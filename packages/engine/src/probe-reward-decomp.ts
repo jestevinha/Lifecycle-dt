@@ -26,7 +26,7 @@
 
 import fs from "node:fs";
 import { runInteractiveSimulation, type StepCommand } from "./runner.js";
-import { ACTIONS, STEPS_PER_SHIFT, shouldTriggerMaintenance } from "./actions.js";
+import { ACTIONS, STEPS_PER_SHIFT } from "./actions.js";
 import {
   WEAR_THRESHOLD, THROUGHPUT_WEIGHT, COST_WEIGHT, ACCIDENT_PENALTY, FAILURE_PENALTY,
   WEAR_PENALTY_SCALE, computeStepReward, aggregateShiftReward, maintenancePenalty,
@@ -95,7 +95,7 @@ async function forcedEpisode(actionId: number, actionName: string, seed: number,
       ? 0
       : prevWear.reduce((best, w, idx) => (w < WEAR_THRESHOLD && w > prevWear[best] ? idx : best), firstEligible);
     const maxWearFrac = prevWear.length > 0 && firstEligible >= 0 ? prevWear[maxIdx] / WEAR_THRESHOLD : 0;
-    if (firstEligible >= 0 && prevWear[maxIdx] > 0 && shouldTriggerMaintenance(currentActionId, maxWearFrac)) {
+    if (firstEligible >= 0 && prevWear[maxIdx] > 0 && ACTIONS[currentActionId].maintainNow) {
       maintTarget = maxIdx;
       preMaintenanceWearFrac = maxWearFrac;
       return { rate: shiftRate, maintainWorkarea: maintTarget };

@@ -29,13 +29,26 @@ export interface SimEvent {
 /** Agent types supported */
 export type AgentType = "mab" | "linucb" | "qlearning";
 
-/** Action the agent can choose (maps to setpointRate + maintenance threshold) */
+/**
+ * Which reward-shaping goal a run trains under (2026-09-23). "balanced" is the
+ * long-standing tuned weights (see reward.ts constants). "production" reweights
+ * toward maximizing throughput even at higher cost/wear; "efficiency" reweights
+ * toward minimizing cost/wear even at lower throughput. See
+ * reward.ts:REWARD_WEIGHT_PROFILES for the actual numbers.
+ */
+export type RewardProfile = "balanced" | "production" | "efficiency";
+
+/** Action the agent can choose (maps to setpointRate + this-shift maintenance choice) */
 export interface Action {
   id: number;
   name: string;
   setpointRate: number;
-  /** Wear fraction at/above which maintenance should fire this shift. Infinity = never. */
-  maintenanceThreshold: number;
+  /**
+   * Whether this action fires maintenance THIS shift (on the most-worn eligible
+   * workarea), decided directly by the agent rather than by comparing live wear
+   * to a static threshold baked into the action. See actions.ts for rationale.
+   */
+  maintainNow: boolean;
 }
 
 /** State vector for contextual agents */
@@ -80,11 +93,26 @@ export interface ExperimentConfig {
   interactive?: boolean;    // opt-in step-level IPC mode (default false)
   wearRateSpread?: number;  // [0,1] per-workarea wear multiplier spread; 0 = lockstep (default)
   allowDegenerateWear?: boolean;  // deliberate opt-in to lockstep wear (wearRateSpread=0) for ablation; see validateExperimentConfig
+  /**
+   * Per-workarea rate control (2026-09-20, selectable so the current
+   * plant-wide-rate mode stays available for comparison — see
+   * Parameter-Sharing-Across-Actions.md in the vault). When true, the agent
+   * makes one selectAction/update decision PER WORKAREA per shift (16
+   * decisions instead of 1), each seeing that workarea's own wear fraction
+   * instead of the plant-wide max, and each rate is applied to only that one
+   * workarea. The preventive-maintenance slot stays capped at 1/shift
+   * plant-wide either way — among workareas whose chosen action requests
+   * maintenance this shift, only the highest-wear one actually gets it.
+   * Requires `interactive: true`; ignored in batch mode.
+   */
+  perWorkareaMode?: boolean;
 }
 
 export interface AgentConfig {
   type: AgentType;
   hyperparams: Record<string, number>;
+  /** Reward-shaping goal this agent trains under. Defaults to "balanced". */
+  rewardProfile?: RewardProfile;
 }
 
 /** Experiment status */

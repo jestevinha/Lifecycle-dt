@@ -1,75 +1,69 @@
 import { useEffect, useState } from "react";
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   ReferenceLine,
 } from "recharts";
-import { fetchExperiment, fetchEpisodes } from "../api";
+import { fetchExperiment, fetchEpisodes, runKey, runLabel, runColor } from "../api";
 import type { Episode, Run } from "../api";
-
-const AGENT_COLORS: Record<string, string> = {
-  mab: "#0D9488",
-  linucb: "#7C3AED",
-  qlearning: "#E11D48",
-};
+import { RunLegend } from "./RunLegend";
 
 // Must match engine reward.ts — Java's Const.NO_PARTS_WEAR_BREAKDOWN.
 const WEAR_THRESHOLD = 4320;
 
 interface WearPoint {
   episode: number;
-  [agent: string]: number | null;
+  [run: string]: number | null;
 }
 
 export function MaintenanceWearChart({ experimentId }: { experimentId: number }) {
   const [data, setData] = useState<WearPoint[]>([]);
-  const [agents, setAgents] = useState<string[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const exp = await fetchExperiment(experimentId);
-      const runs: Run[] = exp.runs ?? [];
-      if (runs.length === 0) return;
+      const expRuns: Run[] = exp.runs ?? [];
+      if (expRuns.length === 0) return;
 
-      const agentNames: string[] = [];
-      const agentEpisodes: Record<string, Episode[]> = {};
+      const runEpisodes: Record<string, Episode[]> = {};
 
       await Promise.all(
-        runs.map(async (run) => {
+        expRuns.map(async (run) => {
           const episodes: Episode[] = await fetchEpisodes(run.id);
-          agentNames.push(run.agent_type);
-          agentEpisodes[run.agent_type] = episodes;
+          runEpisodes[runKey(run)] = episodes;
         }),
       );
 
       if (cancelled) return;
 
       // Check if any episodes have wear data
-      const hasWearData = Object.values(agentEpisodes).some(
+      const hasWearData = Object.values(runEpisodes).some(
         (eps) => eps.some((ep) => ep.max_wear_at_maint != null),
       );
       if (!hasWearData) return;
 
       // Build data points — one per episode number
-      const maxEpisodes = Math.max(...Object.values(agentEpisodes).map((e) => e.length));
+      const maxEpisodes = Math.max(...Object.values(runEpisodes).map((e) => e.length));
       const points: WearPoint[] = [];
       for (let i = 0; i < maxEpisodes; i++) {
         const point: WearPoint = { episode: i };
-        for (const agent of agentNames) {
-          const ep = agentEpisodes[agent]?.[i];
+        for (const run of expRuns) {
+          const key = runKey(run);
+          const ep = runEpisodes[key]?.[i];
           if (ep?.max_wear_at_maint != null) {
             // Clamp to [0, 100] — values above 100% mean the workarea ran past
             // failure before the trigger fired (sim quirk; visualised as 100).
             const pct = (ep.max_wear_at_maint / WEAR_THRESHOLD) * 100;
-            point[agent] = Math.min(100, Math.max(0, pct));
+            point[key] = Math.min(100, Math.max(0, pct));
           } else {
-            point[agent] = null;
+            point[key] = null;
           }
         }
         points.push(point);
       }
 
-      setAgents(agentNames);
+      setRuns(expRuns);
       setData(points);
     })();
     return () => { cancelled = true; };
@@ -79,12 +73,13 @@ export function MaintenanceWearChart({ experimentId }: { experimentId: number })
 
   return (
     <section className="rounded-2xl bg-gray-900 p-6">
-      <h2 className="mb-4 text-lg font-semibold text-gray-100">
+      <h2 className="mb-2 text-lg font-semibold text-gray-100">
         Maintenance Trigger Wear{" "}
         <span className="text-sm font-normal text-gray-400">
           (avg max wear % when maintenance was triggered)
         </span>
       </h2>
+      <RunLegend runs={runs} />
       <ResponsiveContainer width="100%" height={320}>
         <LineChart data={data} margin={{ top: 5, right: 20, bottom: 25, left: 10 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -109,13 +104,13 @@ export function MaintenanceWearChart({ experimentId }: { experimentId: number })
             formatter={(value: unknown) => value != null ? `${Number(value).toFixed(1)}%` : "—"}
             labelFormatter={(label) => `Episode ${label}`}
           />
-          <Legend verticalAlign="top" height={36} />
-          {agents.map((agent) => (
+          {runs.map((run) => (
             <Line
-              key={agent}
+              key={runKey(run)}
               type="monotone"
-              dataKey={agent}
-              stroke={AGENT_COLORS[agent] ?? "#888"}
+              dataKey={runKey(run)}
+              name={runLabel(run)}
+              stroke={runColor(run)}
               strokeWidth={2}
               dot={false}
               connectNulls

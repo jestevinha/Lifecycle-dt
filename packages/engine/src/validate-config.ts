@@ -54,4 +54,31 @@ export function validateExperimentConfig(config: ExperimentConfig): void {
       );
     }
   }
+
+  // ── Check 3: rewardProfile, when set, must be a known profile ──
+  // Config bodies arrive over HTTP as untyped JSON, so a typo (e.g.
+  // "efficient" instead of "efficiency") would otherwise silently fall
+  // through resolveRewardWeights' `?? "balanced"` default and train under
+  // the wrong goal without any signal.
+  const VALID_REWARD_PROFILES = new Set(["balanced", "production", "efficiency"]);
+  for (const agent of config.agents) {
+    if (agent.rewardProfile !== undefined && !VALID_REWARD_PROFILES.has(agent.rewardProfile)) {
+      throw new Error(
+        `[validateExperimentConfig] agent "${agent.type}" has unknown rewardProfile ` +
+        `"${agent.rewardProfile}" — must be one of: balanced, production, efficiency.`,
+      );
+    }
+  }
+
+  // ── Check 4: perWorkareaMode requires interactive mode ──
+  // Batch mode has no per-shift decision loop to fork into a per-workarea one
+  // (see runExperiment's batch-mode warning) — silently ignoring the flag
+  // there would produce a run that looks like it used per-workarea control
+  // but didn't.
+  if (config.perWorkareaMode && !config.interactive) {
+    throw new Error(
+      `[validateExperimentConfig] perWorkareaMode requires interactive:true — batch mode has ` +
+      `no per-shift decision loop for it to apply to.`,
+    );
+  }
 }

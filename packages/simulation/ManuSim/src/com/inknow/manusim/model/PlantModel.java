@@ -22,6 +22,15 @@ public class PlantModel {
 	private Simulator parent;
 	// Energy related variables
 	private double setpointRate;		// setpoint value for current rate for each workarea unit - change with shift
+	// When true, skips this class's own per-shift setCurrRate broadcast below
+	// (2026-09-20, per-workarea rate control) — the caller (HeadlessMain's
+	// interactive/stdin-driven loop) sets currRate itself, per-workarea, every
+	// single step, so the broadcast here would silently overwrite distinct
+	// per-workarea rates with the single scalar `setpointRate` on every 8th
+	// step (shift boundary). Default false: the GUI-driven Simulator and
+	// HeadlessMain's batch mode both set `setpointRate` once and rely on this
+	// broadcast to keep currRate populated every shift — unaffected.
+	private boolean externalRateControl = false;
 	private double currProductionRate;	// instantaneous value for production rate [parts/min] - all units
 	private double currPower;			// instantaneous value for energy consumption [W] - all units
 	private double totalRate;			// instantaneous value for % rate of the plant [0 - 1]
@@ -126,7 +135,9 @@ public class PlantModel {
 			}
 			// at the beginning of the next shift the new rate is set and any failed unit is repaired
 			for(int i = 0; i < this.workareas.size(); i++) {
-				this.workareas.get(i).setCurrRate( this.setpointRate );
+				if ( !this.externalRateControl ) {
+					this.workareas.get(i).setCurrRate( this.setpointRate );
+				}
 				if ( this.workareas.get(i).getStatus() == Const.STATUS_FAILURE ) {
 					this.workareas.get(i).setStatus( Const.STATUS_MAINTENANCE );
 				}
@@ -488,6 +499,11 @@ public class PlantModel {
 	
 	public void setSetPointRate(double setpointRate) {
 		this.setpointRate = setpointRate;
+		return;
+	}
+
+	public void setExternalRateControl(boolean externalRateControl) {
+		this.externalRateControl = externalRateControl;
 		return;
 	}
 

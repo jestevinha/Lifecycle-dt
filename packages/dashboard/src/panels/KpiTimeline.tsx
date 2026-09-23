@@ -1,15 +1,10 @@
 import { useEffect, useState } from "react";
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
-import { fetchExperiment, fetchEpisodes, fetchKpiSteps } from "../api";
+import { fetchExperiment, fetchEpisodes, fetchKpiSteps, runKey, runLabel, runColor } from "../api";
 import type { Run, Episode, KpiStep } from "../api";
-
-const AGENT_COLORS: Record<string, string> = {
-  mab: "#0D9488",
-  linucb: "#7C3AED",
-  qlearning: "#E11D48",
-};
+import { RunLegend } from "./RunLegend";
 
 const METRICS = [
   { key: "total_rate", label: "Production Rate" },
@@ -24,13 +19,25 @@ interface ChartPoint {
   [key: string]: number;
 }
 
+/**
+ * Recharts' XAxis `interval` prop was hardcoded to 19 (show every 20th tick),
+ * which is fine for a few hundred steps but produces 40+ crammed, overlapping
+ * labels on a long run (simSteps=800+) squeezed into a third-width chart.
+ * Pick the skip count dynamically so roughly `targetTicks` labels are shown
+ * regardless of how many steps the episode has.
+ */
+function tickInterval(dataLength: number, targetTicks = 7): number {
+  if (dataLength <= targetTicks) return 0;
+  return Math.ceil(dataLength / targetTicks) - 1;
+}
+
 export function KpiTimeline({ experimentId }: { experimentId: number }) {
   const [dataByMetric, setDataByMetric] = useState<Record<MetricKey, ChartPoint[]>>({
     total_rate: [],
     product_cost: [],
     num_accidents: [],
   });
-  const [agents, setAgents] = useState<string[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -38,14 +45,14 @@ export function KpiTimeline({ experimentId }: { experimentId: number }) {
     (async () => {
       setLoading(true);
       const exp = await fetchExperiment(experimentId);
-      const runs: Run[] = exp.runs ?? [];
-      if (runs.length === 0) { setLoading(false); return; }
+      const expRuns: Run[] = exp.runs ?? [];
+      if (expRuns.length === 0) { setLoading(false); return; }
 
-      const agentNames: string[] = [];
-      const kpiByAgent: Record<string, KpiStep[]> = {};
+      const runsWithData: Run[] = [];
+      const kpiByRun: Record<string, KpiStep[]> = {};
 
       await Promise.all(
-        runs.map(async (run) => {
+        expRuns.map(async (run) => {
           const episodes: Episode[] = await fetchEpisodes(run.id);
           if (episodes.length === 0) return;
 
@@ -53,18 +60,18 @@ export function KpiTimeline({ experimentId }: { experimentId: number }) {
           const bestEp = episodes.reduce((a, b) => (a.reward >= b.reward ? a : b));
           const kpi = await fetchKpiSteps(bestEp.id);
           if (kpi.length > 0) {
-            agentNames.push(run.agent_type);
-            kpiByAgent[run.agent_type] = kpi;
+            runsWithData.push(run);
+            kpiByRun[runKey(run)] = kpi;
           }
         }),
       );
 
       if (cancelled) return;
 
-      if (agentNames.length === 0) { setLoading(false); return; }
+      if (runsWithData.length === 0) { setLoading(false); return; }
 
       const maxStep = Math.max(
-        ...Object.values(kpiByAgent).map((k) => k.length),
+        ...Object.values(kpiByRun).map((k) => k.length),
       );
 
       const result: Record<MetricKey, ChartPoint[]> = {
@@ -76,15 +83,16 @@ export function KpiTimeline({ experimentId }: { experimentId: number }) {
       for (let i = 0; i < maxStep; i++) {
         for (const m of METRICS) {
           const point: ChartPoint = { step: i };
-          for (const agent of agentNames) {
-            const row = kpiByAgent[agent]?.[i];
-            point[agent] = row ? row[m.key] : 0;
+          for (const run of runsWithData) {
+            const key = runKey(run);
+            const row = kpiByRun[key]?.[i];
+            point[key] = row ? row[m.key] : 0;
           }
           result[m.key].push(point);
         }
       }
 
-      setAgents(agentNames);
+      setRuns(runsWithData);
       setDataByMetric(result);
       setLoading(false);
     })();
@@ -100,13 +108,14 @@ export function KpiTimeline({ experimentId }: { experimentId: number }) {
     );
   }
 
-  if (agents.length === 0) return null;
+  if (runs.length === 0) return null;
 
   return (
     <section className="rounded-2xl bg-gray-900 p-6">
-      <h2 className="mb-4 text-lg font-semibold text-gray-100">
+      <h2 className="mb-2 text-lg font-semibold text-gray-100">
         KPI Timeline <span className="text-sm font-normal text-gray-400">(best episode per agent)</span>
       </h2>
+      <RunLegend runs={runs} />
       <div className="grid gap-6 lg:grid-cols-3">
         {METRICS.map((m) => (
           <div key={m.key}>
@@ -117,7 +126,7 @@ export function KpiTimeline({ experimentId }: { experimentId: number }) {
                 <XAxis
                   dataKey="step"
                   stroke="#9CA3AF"
-                  interval={19}
+                  interval={tickInterval(dataByMetric[m.key].length)}
                   label={{ value: "Step", position: "insideBottom", offset: -10, fill: "#9CA3AF", fontSize: 11 }}
                   tick={{ fontSize: 10 }}
                 />
@@ -127,13 +136,13 @@ export function KpiTimeline({ experimentId }: { experimentId: number }) {
                   labelStyle={{ color: "#D1D5DB" }}
                   formatter={(value: number) => Number(value.toFixed(2))}
                 />
-                <Legend verticalAlign="top" height={28} wrapperStyle={{ fontSize: 11 }} />
-                {agents.map((agent) => (
+                {runs.map((run) => (
                   <Line
-                    key={agent}
+                    key={runKey(run)}
                     type="monotone"
-                    dataKey={agent}
-                    stroke={AGENT_COLORS[agent] ?? "#888"}
+                    dataKey={runKey(run)}
+                    name={runLabel(run)}
+                    stroke={runColor(run)}
                     dot={false}
                     strokeWidth={2}
                   />

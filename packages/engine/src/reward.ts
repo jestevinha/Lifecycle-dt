@@ -1,4 +1,4 @@
-import type { KpiStep, State } from "./types.js";
+import type { KpiStep, State, RewardProfile } from "./types.js";
 import { clockToMinutes } from "./utils.js";
 
 // ─── constants ────────────────────────────────────────────────────
@@ -23,9 +23,68 @@ export const COST_WEIGHT        = 0.5;     // productCost weight
 export const THROUGHPUT_WEIGHT  = 8;       // × (totalRate/16); calibrated (medium/high competitive, ordering intact, risk contained)
 export const TOTAL_WORKAREAS    = 16;      // plant-wide capacity divisor for the throughput term
 
-// ─── maintenance timing penalty ──────────────────────────────────
-// Penalises triggering maintenance when wear is low (wasted downtime).
-// Penalty scales linearly from full at 0% wear to zero at MAINT_IDEAL_WEAR.
+// ─── reward profiles (2026-09-23) ───────────────────────────────────
+// The weights above ("balanced") are the long-tuned reference numbers used for
+// every experiment to date. "production" and "efficiency" reweight the SAME
+// components — nothing new is added to the reward, only how much each existing
+// term counts — so all three profiles remain comparable apples-to-apples.
+// accidentPenalty/failurePenalty are held fixed across profiles: safety is
+// treated as a constraint the agent must respect regardless of its goal, not a
+// knob to trade off against throughput or cost.
+export interface RewardWeights {
+  throughputWeight: number;
+  costWeight: number;
+  accidentPenalty: number;
+  failurePenalty: number;
+  wearPenaltyScale: number;
+}
+
+export const REWARD_WEIGHT_PROFILES: Record<RewardProfile, RewardWeights> = {
+  balanced: {
+    throughputWeight: THROUGHPUT_WEIGHT,
+    costWeight: COST_WEIGHT,
+    accidentPenalty: ACCIDENT_PENALTY,
+    failurePenalty: FAILURE_PENALTY,
+    wearPenaltyScale: WEAR_PENALTY_SCALE,
+  },
+  // Pushes for maximum output: throughput counts 1.5× more, cost and wear
+  // count for half as much — the agent should run hotter and tolerate more
+  // wear/cost to chase rate.
+  production: {
+    throughputWeight: THROUGHPUT_WEIGHT * 1.5,
+    costWeight: COST_WEIGHT * 0.5,
+    accidentPenalty: ACCIDENT_PENALTY,
+    failurePenalty: FAILURE_PENALTY,
+    wearPenaltyScale: WEAR_PENALTY_SCALE * 0.5,
+  },
+  // Pushes for low cost/wear: throughput counts for less, cost and wear count
+  // 2× more — the agent should favor cheaper, gentler operation even if
+  // output dips.
+  efficiency: {
+    throughputWeight: THROUGHPUT_WEIGHT * 0.625,
+    costWeight: COST_WEIGHT * 2,
+    accidentPenalty: ACCIDENT_PENALTY,
+    failurePenalty: FAILURE_PENALTY,
+    wearPenaltyScale: WEAR_PENALTY_SCALE * 2,
+  },
+};
+
+/** Resolve a (possibly undefined) profile name to its weights. Defaults to "balanced". */
+export function resolveRewardWeights(profile?: RewardProfile): RewardWeights {
+  return REWARD_WEIGHT_PROFILES[profile ?? "balanced"];
+}
+
+// ─── maintenance timing penalty (REMOVED from the live experiment path 2026-09-19) ──
+// Penalised triggering maintenance when wear is low (wasted downtime), on top of
+// the natural production loss already incurred while the targeted workarea is
+// offline (Unit.java: currRate=0 under STATUS_MAINTENANCE, reflected in the
+// `throughput` term below). That's a hand-tuned bias toward the modeler's own
+// assumption of "ideal" wear timing, not a signal the environment actually
+// produces — agents should learn the maintenance-timing tradeoff purely from the
+// unbiased production-loss cost, not from an artificial penalty layered on top.
+// `packages/api/src/routes/experiments.ts` no longer calls `maintenancePenalty()`.
+// Left here (not deleted) only because several historical `probe-*.ts` scripts
+// still reference it as part of what they were testing at the time.
 export const WASTED_MAINT_PENALTY = 6.0;   // max penalty per wasted maintenance event (was 3.0)
 export const MAINT_IDEAL_WEAR    = 0.85;   // above 85% wear → no penalty (was 0.70)
 
@@ -60,21 +119,24 @@ export interface StepRewardComponents {
  * step (no refire), and the eventual self-heal reset (wearStatus → 0) sees
  * prevWear[i] already >= WEAR_THRESHOLD, so the reset step doesn't match either.
  *
- * `maintainedWorkarea` (Known-Bugs-Fixed #13, fixed 2026-09-05): the index of
- * the workarea deliberately targeted by this shift's MAINT command, or -1 if
- * none. Preventive maintenance normally resets wear before it ever reaches
+ * `maintainedWorkarea` (Known-Bugs-Fixed #13, fixed 2026-09-05; widened to
+ * accept multiple indices 2026-09-21 for multi-target maintenance — see
+ * Per-Workarea-Rate-Control.md): the index (or indices) of the workarea(s)
+ * deliberately targeted by this shift's MAINT command, or -1/empty if none.
+ * Preventive maintenance normally resets wear before it ever reaches
  * WEAR_THRESHOLD, so it wouldn't trigger this detector anyway — the exclusion
  * remains as a guard for the edge case of a maintenance threshold at/near 1.0.
  */
 export function detectFailures(
   prevWear: number[],
   currWear: number[],
-  maintainedWorkarea: number = -1,
+  maintainedWorkarea: number | number[] = -1,
 ): number {
+  const maintained = new Set(Array.isArray(maintainedWorkarea) ? maintainedWorkarea : [maintainedWorkarea]);
   let newFailures = 0;
   const len = Math.min(prevWear.length, currWear.length, 16);
   for (let i = 0; i < len; i++) {
-    if (i === maintainedWorkarea) continue; // deliberate reset, not a failure
+    if (maintained.has(i)) continue; // deliberate reset, not a failure
     const crossedThreshold = prevWear[i] < WEAR_THRESHOLD && currWear[i] >= WEAR_THRESHOLD;
     if (crossedThreshold) newFailures++;
   }
@@ -88,26 +150,32 @@ export function detectFailures(
  * so a step's deliberate MAINT target isn't miscounted as an unplanned
  * failure. Defaults to -1 (no exclusion) so existing callers (probe scripts)
  * that don't pass it keep their prior behavior.
+ *
+ * `weights` (2026-09-23, reward profiles): defaults to the "balanced" profile
+ * (the module constants above), so existing callers that don't pass it keep
+ * their prior behavior unchanged. Pass `resolveRewardWeights(profile)` to
+ * train under "production" or "efficiency" instead.
  */
 export function computeStepReward(
   curr: KpiStep,
   accidentDelta: number,
   prevWear: number[],
-  maintainedWorkarea: number = -1,
+  maintainedWorkarea: number | number[] = -1,
+  weights: RewardWeights = REWARD_WEIGHT_PROFILES.balanced,
 ): StepRewardComponents {
   const currWear = curr.wearByWorkarea ?? [];
   const newFailures = detectFailures(prevWear, currWear, maintainedWorkarea);
 
-  const throughput      = THROUGHPUT_WEIGHT * (curr.totalRate / TOTAL_WORKAREAS);
-  const costPenalty     = COST_WEIGHT * curr.productCost;
-  const accidentPenalty = ACCIDENT_PENALTY * accidentDelta;
-  const failurePenalty  = FAILURE_PENALTY * newFailures;
+  const throughput      = weights.throughputWeight * (curr.totalRate / TOTAL_WORKAREAS);
+  const costPenalty     = weights.costWeight * curr.productCost;
+  const accidentPenalty = weights.accidentPenalty * accidentDelta;
+  const failurePenalty  = weights.failurePenalty * newFailures;
 
   const maxWearFraction = currWear.length > 0
     ? Math.max(...currWear) / WEAR_THRESHOLD
     : 0;
   // Convex in wear: negligible below ~50%, rises sharply toward failure.
-  const wearPenalty = WEAR_PENALTY_SCALE * maxWearFraction * maxWearFraction;
+  const wearPenalty = weights.wearPenaltyScale * maxWearFraction * maxWearFraction;
 
   const total = throughput - costPenalty - accidentPenalty - failurePenalty - wearPenalty;
 
@@ -145,11 +213,16 @@ export function aggregateShiftReward(steps: StepRewardComponents[]): number {
  * Extract a state vector from a single KPI step.
  *
  * When wearByWorkarea is available (interactive mode), the 6th dimension
- * maxWearFraction is included as a predictive maintenance signal.
+ * maxWearFraction is included as a predictive maintenance signal — by
+ * default the PLANT-WIDE max across all 16 workareas. Pass `workareaIndex`
+ * (2026-09-20, per-workarea agent mode) to get that ONE workarea's own wear
+ * fraction instead — the state a per-workarea decision should actually see,
+ * since "the plant's worst workarea is at 80%" tells workarea #3 nothing
+ * useful about its OWN wear if it happens to be healthy.
  */
-export function extractState(step: KpiStep, totalSteps: number): State;
-export function extractState(steps: KpiStep[], totalSteps: number): State;
-export function extractState(input: KpiStep | KpiStep[], totalSteps: number): State {
+export function extractState(step: KpiStep, totalSteps: number, workareaIndex?: number): State;
+export function extractState(steps: KpiStep[], totalSteps: number, workareaIndex?: number): State;
+export function extractState(input: KpiStep | KpiStep[], totalSteps: number, workareaIndex?: number): State {
   const step: KpiStep = Array.isArray(input) ? (input[input.length - 1] ?? {
     step: 0, auditDay: 0, weekDay: 0, clock: "00:00",
     ambTemperature: 20, rawMaterialQuality: 0.5,
@@ -174,7 +247,10 @@ export function extractState(input: KpiStep | KpiStep[], totalSteps: number): St
   };
 
   if (step.wearByWorkarea && step.wearByWorkarea.length > 0) {
-    state.maxWearFraction = Math.max(...step.wearByWorkarea) / WEAR_THRESHOLD;
+    const wear = workareaIndex !== undefined
+      ? step.wearByWorkarea[workareaIndex] ?? 0
+      : Math.max(...step.wearByWorkarea);
+    state.maxWearFraction = wear / WEAR_THRESHOLD;
   }
 
   return state;

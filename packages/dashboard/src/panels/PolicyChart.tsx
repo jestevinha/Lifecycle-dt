@@ -1,15 +1,10 @@
 import { useEffect, useState } from "react";
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from "recharts";
-import { fetchExperiment, fetchEpisodes } from "../api";
+import { fetchExperiment, fetchEpisodes, runKey, runLabel, runColor } from "../api";
 import type { Episode, Run } from "../api";
-
-const AGENT_COLORS: Record<string, string> = {
-  mab: "#0D9488",
-  linucb: "#7C3AED",
-  qlearning: "#E11D48",
-};
+import { RunLegend } from "./RunLegend";
 
 /**
  * Extract the rate-group label from an action name.
@@ -48,25 +43,24 @@ const RATE_ORDER = [
 
 interface DistPoint {
   rate: string;
-  [agent: string]: string | number;
+  [run: string]: string | number;
 }
 
 export function PolicyChart({ experimentId }: { experimentId: number }) {
   const [data, setData] = useState<DistPoint[]>([]);
-  const [agents, setAgents] = useState<string[]>([]);
+  const [runs, setRuns] = useState<Run[]>([]);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       const exp = await fetchExperiment(experimentId);
-      const runs: Run[] = exp.runs ?? [];
-      if (runs.length === 0) return;
+      const expRuns: Run[] = exp.runs ?? [];
+      if (expRuns.length === 0) return;
 
-      const agentNames = runs.map((r) => r.agent_type);
       const distributions: Record<string, Record<string, number>> = {};
 
       await Promise.all(
-        runs.map(async (run) => {
+        expRuns.map(async (run) => {
           const episodes: Episode[] = await fetchEpisodes(run.id);
           // Last 50% of episodes
           const cutoff = Math.floor(episodes.length * 0.5);
@@ -82,7 +76,7 @@ export function PolicyChart({ experimentId }: { experimentId: number }) {
           for (const [k, v] of Object.entries(counts)) {
             counts[k] = Math.round((v / total) * 100);
           }
-          distributions[run.agent_type] = counts;
+          distributions[runKey(run)] = counts;
         }),
       );
 
@@ -90,13 +84,13 @@ export function PolicyChart({ experimentId }: { experimentId: number }) {
 
       const points: DistPoint[] = RATE_ORDER.map((rate) => {
         const point: DistPoint = { rate };
-        for (const agent of agentNames) {
-          point[agent] = distributions[agent]?.[rate] ?? 0;
+        for (const run of expRuns) {
+          point[runKey(run)] = distributions[runKey(run)]?.[rate] ?? 0;
         }
         return point;
       });
 
-      setAgents(agentNames);
+      setRuns(expRuns);
       setData(points);
     })();
     return () => { cancelled = true; };
@@ -106,9 +100,10 @@ export function PolicyChart({ experimentId }: { experimentId: number }) {
 
   return (
     <section className="rounded-2xl bg-gray-900 p-6">
-      <h2 className="mb-4 text-lg font-semibold text-gray-100">
+      <h2 className="mb-2 text-lg font-semibold text-gray-100">
         Policy Distribution <span className="text-sm font-normal text-gray-400">(last 50% episodes, grouped by setpoint rate)</span>
       </h2>
+      <RunLegend runs={runs} />
       <ResponsiveContainer width="100%" height={360}>
         <BarChart data={data} margin={{ top: 5, right: 20, bottom: 25, left: 10 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
@@ -126,12 +121,12 @@ export function PolicyChart({ experimentId }: { experimentId: number }) {
             labelStyle={{ color: "#D1D5DB" }}
             formatter={(value: number) => Number(value.toFixed(2))}
           />
-          <Legend verticalAlign="top" height={36} />
-          {agents.map((agent) => (
+          {runs.map((run) => (
             <Bar
-              key={agent}
-              dataKey={agent}
-              fill={AGENT_COLORS[agent] ?? "#888"}
+              key={runKey(run)}
+              dataKey={runKey(run)}
+              name={runLabel(run)}
+              fill={runColor(run)}
               radius={[4, 4, 0, 0]}
             />
           ))}

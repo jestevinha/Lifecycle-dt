@@ -23,7 +23,7 @@
  */
 import { QLearningAgent } from "./agents/qlearning.js";
 import { runInteractiveSimulation } from "./runner.js";
-import { ACTIONS, STEPS_PER_SHIFT, shouldTriggerMaintenance } from "./actions.js";
+import { ACTIONS, STEPS_PER_SHIFT } from "./actions.js";
 import { computeStepReward, aggregateShiftReward, WEAR_THRESHOLD, maintenancePenalty, MAINT_IDEAL_WEAR } from "./reward.js";
 import { extractState } from "./reward.js";
 import type { KpiStep, State } from "./types.js";
@@ -116,7 +116,7 @@ async function runEpisode(
     shiftRate = ACTIONS[currentActionId].setpointRate;
     const maxIdx = prevWear.reduce((best, w, idx) => (w > prevWear[best] ? idx : best), 0);
     const maxWearFrac = prevWear.length > 0 ? prevWear[maxIdx] / WEAR_THRESHOLD : 0;
-    if (prevWear[maxIdx] > 0 && shouldTriggerMaintenance(currentActionId, maxWearFrac)) {
+    if (prevWear[maxIdx] > 0 && ACTIONS[currentActionId].maintainNow) {
       maintTarget = maxIdx;
       preMaintenanceWearFrac = maxWearFrac;
       return { rate: shiftRate, maintainWorkarea: maintTarget };

@@ -5,11 +5,13 @@ import {
 import { fetchExperiment, fetchEpisodes, fetchKpiSteps, runKey, runLabel, runColor } from "../api";
 import type { Run, Episode, KpiStep } from "../api";
 import { RunLegend } from "./RunLegend";
+import { Card, CardMessage, SectionLabel } from "../ui";
+import { CHART } from "../theme";
 
 const METRICS = [
-  { key: "total_rate", label: "Production Rate" },
-  { key: "product_cost", label: "Product Cost" },
-  { key: "num_accidents", label: "Accidents" },
+  { key: "total_rate", label: "Production rate", unit: "units per step, max 16" },
+  { key: "product_cost", label: "Product cost", unit: "EUR per part" },
+  { key: "num_accidents", label: "Accidents", unit: "cumulative this episode" },
 ] as const;
 
 type MetricKey = (typeof METRICS)[number]["key"];
@@ -31,6 +33,10 @@ function tickInterval(dataLength: number, targetTicks = 7): number {
   return Math.ceil(dataLength / targetTicks) - 1;
 }
 
+/**
+ * Renders a section header plus three cards meant to sit directly inside the
+ * page's 12-column grid (each card spans 4 columns on large screens).
+ */
 export function KpiTimeline({ experimentId }: { experimentId: number }) {
   const [dataByMetric, setDataByMetric] = useState<Record<MetricKey, ChartPoint[]>>({
     total_rate: [],
@@ -46,7 +52,7 @@ export function KpiTimeline({ experimentId }: { experimentId: number }) {
       setLoading(true);
       const exp = await fetchExperiment(experimentId);
       const expRuns: Run[] = exp.runs ?? [];
-      if (expRuns.length === 0) { setLoading(false); return; }
+      if (expRuns.length === 0) { if (!cancelled) { setRuns([]); setLoading(false); } return; }
 
       const runsWithData: Run[] = [];
       const kpiByRun: Record<string, KpiStep[]> = {};
@@ -68,7 +74,11 @@ export function KpiTimeline({ experimentId }: { experimentId: number }) {
 
       if (cancelled) return;
 
-      if (runsWithData.length === 0) { setLoading(false); return; }
+      // Promise.all pushes in completion order — restore the experiment's run order
+      // so legend and line colors don't shuffle between loads.
+      runsWithData.sort((a, b) => expRuns.indexOf(a) - expRuns.indexOf(b));
+
+      if (runsWithData.length === 0) { setRuns([]); setLoading(false); return; }
 
       const maxStep = Math.max(
         ...Object.values(kpiByRun).map((k) => k.length),
@@ -99,59 +109,63 @@ export function KpiTimeline({ experimentId }: { experimentId: number }) {
     return () => { cancelled = true; };
   }, [experimentId]);
 
-  if (loading) {
+  const header = (
+    <SectionLabel
+      title="Shift timeline"
+      detail="best episode per run, step by step"
+      right={<RunLegend runs={runs} />}
+    />
+  );
+
+  if (loading || runs.length === 0) {
     return (
-      <section className="rounded-2xl bg-gray-900 p-6">
-        <h2 className="text-lg font-semibold text-gray-100">KPI Timeline</h2>
-        <p className="mt-4 text-sm text-gray-400">Loading KPI data...</p>
-      </section>
+      <>
+        {header}
+        <Card className="col-span-12" title="KPI timeline">
+          <CardMessage>
+            {loading ? "Loading KPI data…" : "No step-level KPI data stored for this experiment."}
+          </CardMessage>
+        </Card>
+      </>
     );
   }
 
-  if (runs.length === 0) return null;
-
   return (
-    <section className="rounded-2xl bg-gray-900 p-6">
-      <h2 className="mb-2 text-lg font-semibold text-gray-100">
-        KPI Timeline <span className="text-sm font-normal text-gray-400">(best episode per agent)</span>
-      </h2>
-      <RunLegend runs={runs} />
-      <div className="grid gap-6 lg:grid-cols-3">
-        {METRICS.map((m) => (
-          <div key={m.key}>
-            <h3 className="mb-2 text-sm font-medium text-gray-300">{m.label}</h3>
-            <ResponsiveContainer width="100%" height={220}>
-              <LineChart data={dataByMetric[m.key]} margin={{ top: 5, right: 10, bottom: 20, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-                <XAxis
-                  dataKey="step"
-                  stroke="#9CA3AF"
-                  interval={tickInterval(dataByMetric[m.key].length)}
-                  label={{ value: "Step", position: "insideBottom", offset: -10, fill: "#9CA3AF", fontSize: 11 }}
-                  tick={{ fontSize: 10 }}
+    <>
+      {header}
+      {METRICS.map((m) => (
+        <Card key={m.key} className="col-span-12 lg:col-span-4" title={m.label} subtitle={m.unit}>
+          <ResponsiveContainer width="100%" height={210}>
+            <LineChart data={dataByMetric[m.key]} margin={{ top: 6, right: 8, bottom: 14, left: 0 }}>
+              <CartesianGrid {...CHART.grid} />
+              <XAxis
+                dataKey="step"
+                {...CHART.axis}
+                interval={tickInterval(dataByMetric[m.key].length, 5)}
+                label={{ value: "Step", position: "insideBottom", offset: -8, ...CHART.axisLabel }}
+              />
+              <YAxis {...CHART.axis} width={40} />
+              <Tooltip
+                {...CHART.tooltip}
+                labelFormatter={(v) => `Step ${v}`}
+                formatter={(value: number) => Number(value.toFixed(2))}
+              />
+              {runs.map((run) => (
+                <Line
+                  key={runKey(run)}
+                  type="monotone"
+                  dataKey={runKey(run)}
+                  name={runLabel(run)}
+                  stroke={runColor(run)}
+                  dot={false}
+                  strokeWidth={2}
+                  isAnimationActive={false}
                 />
-                <YAxis stroke="#9CA3AF" tick={{ fontSize: 10 }} />
-                <Tooltip
-                  contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: 8, fontSize: 12 }}
-                  labelStyle={{ color: "#D1D5DB" }}
-                  formatter={(value: number) => Number(value.toFixed(2))}
-                />
-                {runs.map((run) => (
-                  <Line
-                    key={runKey(run)}
-                    type="monotone"
-                    dataKey={runKey(run)}
-                    name={runLabel(run)}
-                    stroke={runColor(run)}
-                    dot={false}
-                    strokeWidth={2}
-                  />
-                ))}
-              </LineChart>
-            </ResponsiveContainer>
-          </div>
-        ))}
-      </div>
-    </section>
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </Card>
+      ))}
+    </>
   );
 }

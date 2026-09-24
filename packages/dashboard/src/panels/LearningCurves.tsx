@@ -5,57 +5,89 @@ import {
 import { fetchExperiment, fetchEpisodes, runKey, runLabel, runColor } from "../api";
 import type { Episode, Run } from "../api";
 import { RunLegend } from "./RunLegend";
+import { Card, CardMessage, Segmented } from "../ui";
+import { CHART, niceAxis } from "../theme";
 
 interface ChartPoint {
   episode: number;
   [key: string]: number;
 }
 
+type Metric = "reward" | "energy";
+
 function rollingAvg(arr: number[], window: number): number[] {
   const result: number[] = [];
+  let sum = 0;
   for (let i = 0; i < arr.length; i++) {
-    const start = Math.max(0, i - window + 1);
-    const slice = arr.slice(start, i + 1);
-    result.push(slice.reduce((a, b) => a + b, 0) / slice.length);
+    sum += arr[i];
+    if (i >= window) sum -= arr[i - window];
+    result.push(sum / Math.min(i + 1, window));
   }
   return result;
 }
 
-export function LearningCurves({ experimentId }: { experimentId: number }) {
-  const [data, setData] = useState<ChartPoint[]>([]);
+/**
+ * Smoothing window scaled to run length: a fixed 5-episode window is fine for
+ * a 100-episode run but leaves a 2000-episode curve as noisy as the raw data.
+ * ~1/40th of the run keeps the trend readable at any length.
+ */
+function smoothingWindow(episodes: number): number {
+  return Math.max(5, Math.round(episodes / 40));
+}
+
+/**
+ * Y range fitted to the smoothed lines rather than the raw points: a handful
+ * of early exploration episodes can sit 10× below the converged reward, and
+ * letting them set the axis flattens every curve. The first `skip` points are
+ * ignored too, since the rolling mean there still averages only a few
+ * episodes. Raw points outside the range are clipped (allowDataOverflow).
+ */
+function fittedRange(data: ChartPoint[], keys: string[], skip: number): [number, number] {
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const p of data.slice(Math.min(skip, Math.floor(data.length / 2)))) {
+    for (const k of keys) {
+      const v = p[k];
+      if (Number.isFinite(v)) { lo = Math.min(lo, v); hi = Math.max(hi, v); }
+    }
+  }
+  const pad = (hi - lo || Math.abs(hi) || 1) * 0.1;
+  return [lo - pad, hi + pad];
+}
+
+export function LearningCurves({ experimentId, className }: { experimentId: number; className?: string }) {
+  const [rewardData, setRewardData] = useState<ChartPoint[]>([]);
   const [energyData, setEnergyData] = useState<ChartPoint[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [smoothWin, setSmoothWin] = useState(5);
+  const [metric, setMetric] = useState<Metric>("reward");
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      setLoading(true);
       const exp = await fetchExperiment(experimentId);
       const expRuns: Run[] = exp.runs ?? [];
-      if (expRuns.length === 0) return;
+      if (expRuns.length === 0) { if (!cancelled) setLoading(false); return; }
 
       const episodesByRun: Record<string, Episode[]> = {};
-
       await Promise.all(
         expRuns.map(async (run) => {
           episodesByRun[runKey(run)] = await fetchEpisodes(run.id);
         }),
       );
-
       if (cancelled) return;
 
-      const maxEp = Math.max(
-        ...Object.values(episodesByRun).map((eps) => eps.length),
-      );
+      const maxEp = Math.max(0, ...Object.values(episodesByRun).map((eps) => eps.length));
+      const w = smoothingWindow(maxEp);
 
-      // Compute rolling averages for reward
       const avgByRun: Record<string, number[]> = {};
       const energyAvgByRun: Record<string, number[]> = {};
       for (const run of expRuns) {
         const key = runKey(run);
-        const rewards = episodesByRun[key]?.map((e) => e.reward) ?? [];
-        avgByRun[key] = rollingAvg(rewards, 5);
-        const energies = episodesByRun[key]?.map((e) => e.energy_per_part ?? 0) ?? [];
-        energyAvgByRun[key] = rollingAvg(energies, 5);
+        avgByRun[key] = rollingAvg(episodesByRun[key]?.map((e) => e.reward) ?? [], w);
+        energyAvgByRun[key] = rollingAvg(episodesByRun[key]?.map((e) => e.energy_per_part ?? 0) ?? [], w);
       }
 
       const points: ChartPoint[] = [];
@@ -75,82 +107,66 @@ export function LearningCurves({ experimentId }: { experimentId: number }) {
       }
 
       setRuns(expRuns);
-      setData(points);
+      setSmoothWin(w);
+      setRewardData(points);
       setEnergyData(ePoints);
+      setLoading(false);
     })();
     return () => { cancelled = true; };
   }, [experimentId]);
 
-  if (data.length === 0) return null;
+  const data = metric === "reward" ? rewardData : energyData;
+  const digits = metric === "reward" ? 2 : 4;
+  const y = niceAxis(...fittedRange(data, runs.map((r) => `${runKey(r)}_avg`), smoothWin));
+  const x = niceAxis(0, Math.max(data.length - 1, 1), 6);
 
   return (
-    <section className="rounded-2xl bg-gray-900 p-6">
-      <h2 className="mb-2 text-lg font-semibold text-gray-100">Learning Curves</h2>
-      <RunLegend runs={runs} />
-      <ResponsiveContainer width="100%" height={360}>
-        <LineChart data={data} margin={{ top: 5, right: 20, bottom: 25, left: 10 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-          <XAxis
-            dataKey="episode"
-            stroke="#9CA3AF"
-            label={{ value: "Episode", position: "insideBottom", offset: -15, fill: "#9CA3AF" }}
-          />
-          <YAxis
-            stroke="#9CA3AF"
-            label={{ value: "Reward", angle: -90, position: "insideLeft", fill: "#9CA3AF" }}
-          />
-          <Tooltip
-            contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: 8 }}
-            labelStyle={{ color: "#D1D5DB" }}
-            formatter={(value: number) => Number(value.toFixed(2))}
-          />
-          {runs.map((run) => (
-            <Line
-              key={runKey(run)}
-              type="monotone"
-              dataKey={runKey(run)}
-              name={`${runLabel(run)} (raw)`}
-              stroke={runColor(run)}
-              strokeOpacity={0.25}
-              dot={false}
-              strokeWidth={1}
-            />
-          ))}
-          {runs.map((run) => (
-            <Line
-              key={`${runKey(run)}_avg`}
-              type="monotone"
-              dataKey={`${runKey(run)}_avg`}
-              name={`${runLabel(run)} (avg5)`}
-              stroke={runColor(run)}
-              dot={false}
-              strokeWidth={2}
-            />
-          ))}
-        </LineChart>
-      </ResponsiveContainer>
-
-      {energyData.length > 0 && (
+    <Card
+      className={className}
+      title="Learning curve"
+      subtitle={`faint = per episode · bold = rolling mean (${smoothWin} ep)`}
+      actions={
+        <Segmented
+          label="Learning curve metric"
+          value={metric}
+          onChange={setMetric}
+          options={[
+            { value: "reward", label: "Reward" },
+            { value: "energy", label: "kWh / part" },
+          ]}
+        />
+      }
+    >
+      {loading ? (
+        <CardMessage>Loading episodes…</CardMessage>
+      ) : data.length === 0 ? (
+        <CardMessage>No episodes recorded for this experiment.</CardMessage>
+      ) : (
         <>
-          <h2 className="mb-2 mt-8 text-lg font-semibold text-gray-100">
-            Energy Efficiency (kWh/part)
-          </h2>
-          <ResponsiveContainer width="100%" height={360}>
-            <LineChart data={energyData} margin={{ top: 5, right: 20, bottom: 25, left: 10 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+          <RunLegend runs={runs} />
+          <ResponsiveContainer width="100%" height={300}>
+            <LineChart data={data} margin={{ top: 8, right: 12, bottom: 18, left: 4 }}>
+              <CartesianGrid {...CHART.grid} />
               <XAxis
                 dataKey="episode"
-                stroke="#9CA3AF"
-                label={{ value: "Episode", position: "insideBottom", offset: -15, fill: "#9CA3AF" }}
+                {...CHART.axis}
+                label={{ value: "Episode", position: "insideBottom", offset: -10, ...CHART.axisLabel }}
+                type="number"
+                domain={[0, Math.max(data.length - 1, 1)]}
+                ticks={x.ticks.filter((t) => t <= data.length - 1)}
               />
               <YAxis
-                stroke="#9CA3AF"
-                label={{ value: "kWh / part", angle: -90, position: "insideLeft", fill: "#9CA3AF" }}
+                {...CHART.axis}
+                width={52}
+                domain={y.domain}
+                ticks={y.ticks}
+                allowDataOverflow
+                tickFormatter={(v: number) => (metric === "reward" ? v.toFixed(0) : v.toFixed(2))}
               />
               <Tooltip
-                contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: 8 }}
-                labelStyle={{ color: "#D1D5DB" }}
-                formatter={(value: number) => Number(value.toFixed(4))}
+                {...CHART.tooltip}
+                labelFormatter={(v) => `Episode ${v}`}
+                formatter={(value: number) => Number(value.toFixed(digits))}
               />
               {runs.map((run) => (
                 <Line
@@ -159,9 +175,10 @@ export function LearningCurves({ experimentId }: { experimentId: number }) {
                   dataKey={runKey(run)}
                   name={`${runLabel(run)} (raw)`}
                   stroke={runColor(run)}
-                  strokeOpacity={0.25}
+                  strokeOpacity={0.12}
                   dot={false}
                   strokeWidth={1}
+                  isAnimationActive={false}
                 />
               ))}
               {runs.map((run) => (
@@ -169,16 +186,17 @@ export function LearningCurves({ experimentId }: { experimentId: number }) {
                   key={`${runKey(run)}_avg`}
                   type="monotone"
                   dataKey={`${runKey(run)}_avg`}
-                  name={`${runLabel(run)} (avg5)`}
+                  name={`${runLabel(run)} (mean)`}
                   stroke={runColor(run)}
                   dot={false}
-                  strokeWidth={2}
+                  strokeWidth={2.25}
+                  isAnimationActive={false}
                 />
               ))}
             </LineChart>
           </ResponsiveContainer>
         </>
       )}
-    </section>
+    </Card>
   );
 }

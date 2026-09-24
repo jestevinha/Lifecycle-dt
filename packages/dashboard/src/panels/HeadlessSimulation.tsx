@@ -5,14 +5,16 @@ import {
 import { runHeadlessSimulation } from "../api";
 import type { SimKpiStep } from "../api";
 import { PlantVisualPanel } from "./PlantVisualPanel";
+import { Card, CardMessage, StatTile, btnPrimary, inputClass } from "../ui";
+import { CHART } from "../theme";
 
 const METRICS = [
-  { key: "totalRate",       label: "Production Rate",   color: "#0D9488" },
-  { key: "productCost",     label: "Product Cost",      color: "#7C3AED" },
-  { key: "numberAccidents", label: "Accidents",         color: "#E11D48" },
-  { key: "cumProduction",   label: "Cum. Production",   color: "#F59E0B" },
-  { key: "cumEnergy",       label: "Cum. Energy",       color: "#3B82F6" },
-  { key: "currPower",       label: "Current Power",     color: "#EC4899" },
+  { key: "totalRate",       label: "Production rate",   color: "#0F766E" },
+  { key: "productCost",     label: "Product cost",      color: "#6D28D9" },
+  { key: "numberAccidents", label: "Accidents",         color: "#B91C1C" },
+  { key: "cumProduction",   label: "Cum. production",   color: "#B45309" },
+  { key: "cumEnergy",       label: "Cum. energy",       color: "#1D4ED8" },
+  { key: "currPower",       label: "Current power",     color: "#BE185D" },
 ] as const;
 
 type MetricKey = (typeof METRICS)[number]["key"];
@@ -63,195 +65,140 @@ export function HeadlessSimulation() {
     : null;
 
   return (
-    <section className="rounded-2xl bg-gray-900 p-6">
-      <h2 className="mb-4 text-lg font-semibold text-gray-100">
-        Headless Simulation
-      </h2>
-
-      {/* Controls */}
-      <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {/* Setpoint Rate — prominent slider */}
-        <div className="sm:col-span-2 lg:col-span-2">
-          <label className="mb-1 block text-sm font-medium text-gray-300">
-            Setpoint Rate
-          </label>
-          <div className="flex items-center gap-3">
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={setpointRate}
-              onChange={(e) => setSetpointRate(Number(e.target.value))}
-              className="h-2 flex-1 cursor-pointer appearance-none rounded-lg bg-gray-700 accent-teal-500"
-              disabled={running}
-            />
-            <input
-              type="number"
-              min={0}
-              max={1}
-              step={0.01}
-              value={setpointRate}
-              onChange={(e) => setSetpointRate(Math.min(1, Math.max(0, Number(e.target.value))))}
-              className="w-20 rounded-lg border border-gray-700 bg-gray-800 px-2 py-1.5 text-center text-sm text-gray-200 focus:border-teal-500 focus:outline-none"
-              disabled={running}
-            />
-          </div>
-        </div>
-
-        <div>
-          <label className="mb-1 block text-sm font-medium text-gray-300">Steps</label>
-          <input
-            type="number"
-            min={1}
-            value={steps}
-            onChange={(e) => setSteps(Number(e.target.value))}
-            className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200 focus:border-teal-500 focus:outline-none"
-            disabled={running}
-          />
-        </div>
-
-        <div>
-          <label className="mb-1 block text-sm font-medium text-gray-300">Seed</label>
-          <div className="flex gap-2">
-            <input
-              type="number"
-              value={seed}
-              onChange={(e) => setSeed(Number(e.target.value))}
-              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200 focus:border-teal-500 focus:outline-none"
-              disabled={running}
-            />
-            <button
-              type="button"
-              onClick={handleRun}
-              disabled={running}
-              className="whitespace-nowrap rounded-lg bg-teal-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-teal-500 disabled:opacity-50"
-            >
-              {running ? "Running..." : "Run"}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {/* Error */}
-      {error && (
-        <div className="mb-4 rounded-lg border border-red-800 bg-red-900/30 px-4 py-2 text-sm text-red-300">
-          {error}
-        </div>
-      )}
-
-      {/* Summary Stats */}
-      {summary && (
-        <div className="mb-6 grid grid-cols-2 gap-3 sm:grid-cols-5">
-          <StatCard label="Avg Production Rate" value={summary.avgRate} color="#0D9488" />
-          <StatCard label="Avg Product Cost" value={summary.avgCost} color="#7C3AED" />
-          <StatCard label="Total Accidents" value={String(summary.totalAccidents)} color="#E11D48" />
-          <StatCard label="Total Production" value={summary.totalProduction} color="#F59E0B" />
-          <StatCard label="Total Energy" value={summary.totalEnergy} color="#3B82F6" />
-        </div>
-      )}
-
-      {/* Plant Visual */}
-      {kpiData && kpiData.length > 0 && (
-        <div className="mb-6">
-          <PlantVisualPanel kpiData={kpiData} />
-        </div>
-      )}
-
-      {/* Metric toggles */}
-      {kpiData && (
-        <div className="mb-4 flex flex-wrap gap-3">
-          {METRICS.map((m) => (
-            <label
-              key={m.key}
-              className="flex cursor-pointer items-center gap-1.5 text-xs text-gray-300"
-            >
+    <div className="grid grid-cols-12 gap-5">
+      {/* ── Settings + summary ── */}
+      <Card className="col-span-12 xl:col-span-4" title="Headless simulation" subtitle="fixed set-point, no agent">
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="sim-setpoint" className="text-sm font-medium text-ink-2">Set-point rate</label>
+            <div className="flex items-center gap-3">
               <input
-                type="checkbox"
-                checked={visibleMetrics.has(m.key)}
-                onChange={() => toggleMetric(m.key)}
-                className="rounded border-gray-600 bg-gray-800 accent-teal-500"
+                id="sim-setpoint"
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={setpointRate}
+                onChange={(e) => setSetpointRate(Number(e.target.value))}
+                className="h-2 flex-1 cursor-pointer accent-[#0B4F5C]"
+                disabled={running}
               />
-              <span
-                className="inline-block h-2 w-2 rounded-full"
-                style={{ backgroundColor: m.color }}
+              <input
+                type="number"
+                aria-label="Set-point rate value"
+                min={0}
+                max={1}
+                step={0.01}
+                value={setpointRate}
+                onChange={(e) => setSetpointRate(Math.min(1, Math.max(0, Number(e.target.value))))}
+                className={`${inputClass} tabular w-20 text-center font-mono`}
+                disabled={running}
               />
-              {m.label}
-            </label>
-          ))}
-        </div>
-      )}
+            </div>
+          </div>
 
-      {/* Charts */}
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Steps</span>
+              <input
+                type="number"
+                min={1}
+                value={steps}
+                onChange={(e) => setSteps(Number(e.target.value))}
+                className={`${inputClass} tabular font-mono`}
+                disabled={running}
+              />
+            </label>
+            <label className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium text-ink-2">Seed</span>
+              <input
+                type="number"
+                value={seed}
+                onChange={(e) => setSeed(Number(e.target.value))}
+                className={`${inputClass} tabular font-mono`}
+                disabled={running}
+              />
+            </label>
+          </div>
+
+          <button type="button" onClick={handleRun} disabled={running} className={btnPrimary}>
+            {running ? "Running…" : "Run simulation"}
+          </button>
+
+          {error && (
+            <div className="rounded-lg border border-crit/30 bg-crit-soft px-3 py-2 text-sm text-crit">{error}</div>
+          )}
+
+          {summary && (
+            <div className="grid grid-cols-2 gap-2.5 border-t border-grid pt-4">
+              <StatTile label="Avg rate" value={summary.avgRate} unit="/ 16" />
+              <StatTile label="Avg cost" value={summary.avgCost} unit="EUR/part" />
+              <StatTile label="Accidents" value={summary.totalAccidents} tone={summary.totalAccidents > 0 ? "crit" : "ok"} />
+              <StatTile label="Production" value={summary.totalProduction} unit="parts" />
+              <StatTile label="Energy" value={summary.totalEnergy} />
+            </div>
+          )}
+        </div>
+      </Card>
+
+      {/* ── Plant floor ── */}
+      <Card className="col-span-12 xl:col-span-8" title="Plant floor" subtitle="step playback">
+        {kpiData && kpiData.length > 0 ? (
+          <PlantVisualPanel kpiData={kpiData} />
+        ) : (
+          <CardMessage>
+            {running
+              ? "Running simulation…"
+              : "Choose a set-point rate, steps and seed, then run a headless simulation."}
+          </CardMessage>
+        )}
+      </Card>
+
+      {/* ── Metric charts ── */}
       {kpiData && kpiData.length > 0 && (
-        <div className="grid gap-6 lg:grid-cols-3">
+        <>
+          <div className="col-span-12 flex flex-wrap items-center gap-2" role="group" aria-label="Metrics shown">
+            <span className="mr-1 text-xs font-semibold uppercase tracking-[0.06em] text-ink-2">Metrics</span>
+            {METRICS.map((m) => (
+              <label
+                key={m.key}
+                className="flex h-8 cursor-pointer items-center gap-2 rounded-full border border-line bg-surface px-3 text-xs text-ink-2 has-[:checked]:border-ink-3 has-[:checked]:text-ink"
+              >
+                <input
+                  type="checkbox"
+                  checked={visibleMetrics.has(m.key)}
+                  onChange={() => toggleMetric(m.key)}
+                  className="h-3.5 w-3.5 accent-[#0B4F5C]"
+                />
+                <span className="inline-block h-2.5 w-2.5 rounded-[3px]" style={{ backgroundColor: m.color }} />
+                {m.label}
+              </label>
+            ))}
+          </div>
           {METRICS.filter((m) => visibleMetrics.has(m.key)).map((m) => (
-            <div key={m.key}>
-              <h3 className="mb-2 text-sm font-medium text-gray-300">{m.label}</h3>
-              <ResponsiveContainer width="100%" height={220}>
-                <LineChart
-                  data={kpiData}
-                  margin={{ top: 5, right: 10, bottom: 20, left: 0 }}
-                >
-                  <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+            <Card key={m.key} className="col-span-12 md:col-span-6 xl:col-span-4" title={m.label}>
+              <ResponsiveContainer width="100%" height={210}>
+                <LineChart data={kpiData} margin={{ top: 6, right: 8, bottom: 14, left: 0 }}>
+                  <CartesianGrid {...CHART.grid} />
                   <XAxis
                     dataKey="step"
-                    stroke="#9CA3AF"
-                    interval={19}
-                    label={{
-                      value: "Step",
-                      position: "insideBottom",
-                      offset: -10,
-                      fill: "#9CA3AF",
-                      fontSize: 11,
-                    }}
-                    tick={{ fontSize: 10 }}
+                    {...CHART.axis}
+                    minTickGap={40}
+                    label={{ value: "Step", position: "insideBottom", offset: -8, ...CHART.axisLabel }}
                   />
-                  <YAxis stroke="#9CA3AF" tick={{ fontSize: 10 }} />
+                  <YAxis {...CHART.axis} width={48} />
                   <Tooltip
-                    contentStyle={{
-                      backgroundColor: "#1F2937",
-                      border: "1px solid #374151",
-                      borderRadius: 8,
-                      fontSize: 12,
-                    }}
-                    labelStyle={{ color: "#D1D5DB" }}
+                    {...CHART.tooltip}
                     labelFormatter={(v) => `Step ${v}`}
                     formatter={(value: number) => [Number(value.toFixed(4)), m.label]}
                   />
-                  <Line
-                    type="monotone"
-                    dataKey={m.key}
-                    stroke={m.color}
-                    dot={false}
-                    strokeWidth={2}
-                  />
+                  <Line type="monotone" dataKey={m.key} stroke={m.color} dot={false} strokeWidth={2} isAnimationActive={false} />
                 </LineChart>
               </ResponsiveContainer>
-            </div>
+            </Card>
           ))}
-        </div>
+        </>
       )}
-
-      {/* Empty state */}
-      {!kpiData && !running && !error && (
-        <div className="rounded-xl bg-gray-800/50 p-8 text-center">
-          <p className="text-sm text-gray-400">
-            Set a <span className="font-medium text-teal-400">setpoint rate</span>, configure steps
-            &amp; seed, then click <span className="font-medium text-white">Run</span> to execute a
-            headless simulation.
-          </p>
-        </div>
-      )}
-    </section>
-  );
-}
-
-function StatCard({ label, value, color }: { label: string; value: string; color: string }) {
-  return (
-    <div className="rounded-xl bg-gray-800 px-3 py-2">
-      <p className="text-xs text-gray-400">{label}</p>
-      <p className="mt-0.5 text-base font-semibold" style={{ color }}>{value}</p>
     </div>
   );
 }

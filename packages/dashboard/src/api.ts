@@ -22,7 +22,7 @@ export interface Run {
   reward_profile: RewardProfile | null;
 }
 
-const AGENT_LABELS: Record<string, string> = {
+export const AGENT_LABELS: Record<string, string> = {
   mab: "MAB",
   linucb: "LinUCB",
   qlearning: "Q-Learning",
@@ -54,20 +54,28 @@ export function runLabel(run: Run): string {
 
 /**
  * Color per run, keyed the same way as runKey(). Same base hue per agent
- * (matches the historical AGENT_COLORS), shaded lighter for "production" and
- * darker for "efficiency" so agent×profile combos stay visually distinct
- * without agents losing their established identity color.
+ * (teal = MAB, violet = LinUCB, orange = Q-Learning), shaded lighter for
+ * "production" and darker for "efficiency" so agent×profile combos stay
+ * visually distinct. Tuned for the light theme: every shade keeps ≥3:1
+ * contrast against white so lines stay readable on the chart cards.
  */
 export const RUN_COLORS: Record<string, string> = {
-  "mab:balanced": "#0D9488",
-  "mab:production": "#2DD4BF",
-  "mab:efficiency": "#065F46",
-  "linucb:balanced": "#7C3AED",
-  "linucb:production": "#C4B5FD",
-  "linucb:efficiency": "#4C1D95",
-  "qlearning:balanced": "#E11D48",
-  "qlearning:production": "#FB7185",
-  "qlearning:efficiency": "#881337",
+  "mab:balanced": "#0F766E",
+  "mab:production": "#14B8A6",
+  "mab:efficiency": "#134E4A",
+  "linucb:balanced": "#6D28D9",
+  "linucb:production": "#A78BFA",
+  "linucb:efficiency": "#3B0764",
+  "qlearning:balanced": "#C2410C",
+  "qlearning:production": "#F97316",
+  "qlearning:efficiency": "#7C2D12",
+};
+
+/** Base identity color per agent (the "balanced" shade). */
+export const AGENT_COLORS: Record<string, string> = {
+  mab: RUN_COLORS["mab:balanced"],
+  linucb: RUN_COLORS["linucb:balanced"],
+  qlearning: RUN_COLORS["qlearning:balanced"],
 };
 
 export function runColor(run: Run): string {

@@ -6,6 +6,8 @@ import {
 import { fetchExperiment, fetchEpisodes, runKey, runLabel, runColor } from "../api";
 import type { Episode, Run } from "../api";
 import { RunLegend } from "./RunLegend";
+import { Card, CardMessage } from "../ui";
+import { CHART, T, niceAxis } from "../theme";
 
 // Must match engine reward.ts — Java's Const.NO_PARTS_WEAR_BREAKDOWN.
 const WEAR_THRESHOLD = 4320;
@@ -15,16 +17,18 @@ interface WearPoint {
   [run: string]: number | null;
 }
 
-export function MaintenanceWearChart({ experimentId }: { experimentId: number }) {
+export function MaintenanceWearChart({ experimentId, className }: { experimentId: number; className?: string }) {
   const [data, setData] = useState<WearPoint[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      setLoading(true);
       const exp = await fetchExperiment(experimentId);
       const expRuns: Run[] = exp.runs ?? [];
-      if (expRuns.length === 0) return;
+      if (expRuns.length === 0) { if (!cancelled) { setData([]); setLoading(false); } return; }
 
       const runEpisodes: Record<string, Episode[]> = {};
 
@@ -41,7 +45,7 @@ export function MaintenanceWearChart({ experimentId }: { experimentId: number })
       const hasWearData = Object.values(runEpisodes).some(
         (eps) => eps.some((ep) => ep.max_wear_at_maint != null),
       );
-      if (!hasWearData) return;
+      if (!hasWearData) { setData([]); setLoading(false); return; }
 
       // Build data points — one per episode number
       const maxEpisodes = Math.max(...Object.values(runEpisodes).map((e) => e.length));
@@ -65,59 +69,89 @@ export function MaintenanceWearChart({ experimentId }: { experimentId: number })
 
       setRuns(expRuns);
       setData(points);
+      setLoading(false);
     })();
     return () => { cancelled = true; };
   }, [experimentId]);
 
-  if (data.length === 0) return null;
+  // Fit the axis to the data: agents typically service at a few percent wear,
+  // which a fixed 0–100% axis squashes into a flat line along the bottom.
+  // The 95% failure line is drawn only when the data actually reaches it.
+  let maxPct = 0;
+  for (const p of data) {
+    for (const run of runs) {
+      const v = p[runKey(run)];
+      if (v != null && v > maxPct) maxPct = v;
+    }
+  }
+  const showFailure = maxPct >= 60;
+  const y = showFailure
+    ? { ticks: [0, 25, 50, 75, 95], domain: [0, 100] as [number, number] }
+    : niceAxis(0, Math.max(maxPct * 1.1, 1), 4);
+  const x = niceAxis(0, Math.max(data.length - 1, 1), 4);
 
   return (
-    <section className="rounded-2xl bg-gray-900 p-6">
-      <h2 className="mb-2 text-lg font-semibold text-gray-100">
-        Maintenance Trigger Wear{" "}
-        <span className="text-sm font-normal text-gray-400">
-          (avg max wear % when maintenance was triggered)
-        </span>
-      </h2>
-      <RunLegend runs={runs} />
-      <ResponsiveContainer width="100%" height={320}>
-        <LineChart data={data} margin={{ top: 5, right: 20, bottom: 25, left: 10 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-          <XAxis
-            dataKey="episode"
-            stroke="#9CA3AF"
-            label={{ value: "Episode", position: "insideBottom", offset: -15, fill: "#9CA3AF" }}
-          />
-          <YAxis
-            stroke="#9CA3AF"
-            domain={[0, 100]}
-            ticks={[0, 25, 50, 75, 95, 100]}
-            allowDataOverflow
-            tickFormatter={(v: number) => `${v}%`}
-            width={56}
-            label={{ value: "Wear %", angle: -90, position: "insideLeft", fill: "#9CA3AF" }}
-          />
-          <ReferenceLine y={95} stroke="#EF4444" strokeDasharray="6 3" label={{ value: "Failure (95%)", fill: "#EF4444", fontSize: 11, position: "right" }} />
-          <Tooltip
-            contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: 8 }}
-            labelStyle={{ color: "#D1D5DB" }}
-            formatter={(value: unknown) => value != null ? `${Number(value).toFixed(1)}%` : "—"}
-            labelFormatter={(label) => `Episode ${label}`}
-          />
-          {runs.map((run) => (
-            <Line
-              key={runKey(run)}
-              type="monotone"
-              dataKey={runKey(run)}
-              name={runLabel(run)}
-              stroke={runColor(run)}
-              strokeWidth={2}
-              dot={false}
-              connectNulls
-            />
-          ))}
-        </LineChart>
-      </ResponsiveContainer>
-    </section>
+    <Card
+      className={className}
+      title="Maintenance trigger wear"
+      subtitle={showFailure ? "max wear % when service fired" : `max wear % when service fired · failure at 95% (off scale)`}
+    >
+      {loading ? (
+        <CardMessage>Loading episodes…</CardMessage>
+      ) : data.length === 0 ? (
+        <CardMessage>No wear data — run in interactive mode to record it.</CardMessage>
+      ) : (
+        <>
+          <RunLegend runs={runs} />
+          <ResponsiveContainer width="100%" height={240}>
+            <LineChart data={data} margin={{ top: 6, right: 8, bottom: 14, left: 0 }}>
+              <CartesianGrid {...CHART.grid} />
+              <XAxis
+                dataKey="episode"
+                {...CHART.axis}
+                type="number"
+                domain={[0, Math.max(data.length - 1, 1)]}
+                ticks={x.ticks.filter((t) => t <= data.length - 1)}
+                label={{ value: "Episode", position: "insideBottom", offset: -8, ...CHART.axisLabel }}
+              />
+              <YAxis
+                {...CHART.axis}
+                domain={y.domain}
+                ticks={y.ticks}
+                allowDataOverflow
+                tickFormatter={(v: number) => `${v}%`}
+                width={44}
+              />
+              {showFailure && (
+                <ReferenceLine
+                  y={95}
+                  stroke={T.crit}
+                  strokeDasharray="5 4"
+                  label={{ value: "Failure", fill: T.crit, fontSize: 11, fontWeight: 600, position: "insideTopRight" }}
+                />
+              )}
+              <Tooltip
+                {...CHART.tooltip}
+                formatter={(value: unknown) => (value != null ? `${Number(value).toFixed(1)}%` : "—")}
+                labelFormatter={(label) => `Episode ${label}`}
+              />
+              {runs.map((run) => (
+                <Line
+                  key={runKey(run)}
+                  type="monotone"
+                  dataKey={runKey(run)}
+                  name={runLabel(run)}
+                  stroke={runColor(run)}
+                  strokeWidth={1.75}
+                  dot={false}
+                  connectNulls
+                  isAnimationActive={false}
+                />
+              ))}
+            </LineChart>
+          </ResponsiveContainer>
+        </>
+      )}
+    </Card>
   );
 }

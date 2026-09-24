@@ -1,1 +1,34 @@
 @import "tailwindcss";
+
+/*
+ * Design tokens for the light "plant supervision" theme. Tailwind v4 turns
+ * each --color-* / --font-* here into utilities (bg-canvas, text-ink-3,
+ * border-line, font-mono, …). Chart code that can't use classes (Recharts
+ * props) reads the same values from src/theme.ts — keep the two in sync.
+ */
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+
+  --color-canvas: #f3f3ef;
+  --color-surface: #ffffff;
+  --color-line: #e3e3dd;
+  --color-line-strong: #cfcfc8;
+  --color-grid: #ecece7;
+  --color-ink: #17191c;
+  --color-ink-2: #454a52;
+  --color-ink-3: #646973;
+  --color-accent: #0b4f5c;
+  --color-accent-hover: #073842;
+  --color-accent-soft: #eef5f4;
+  --color-ok: #15803d;
+  --color-ok-soft: #e3f1e8;
+  --color-warn: #b45309;
+  --color-warn-soft: #fbf1ea;
+  --color-crit: #b91c1c;
+  --color-crit-soft: #fdecec;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}

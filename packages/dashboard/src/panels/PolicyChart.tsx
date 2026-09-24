@@ -1,10 +1,7 @@
 import { useEffect, useState } from "react";
-import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-} from "recharts";
 import { fetchExperiment, fetchEpisodes, runKey, runLabel, runColor } from "../api";
 import type { Episode, Run } from "../api";
-import { RunLegend } from "./RunLegend";
+import { Card, CardMessage, Swatch } from "../ui";
 
 /**
  * Extract the rate-group label from an action name.
@@ -41,97 +38,127 @@ const RATE_ORDER = [
   "very_high (0.80)",
 ];
 
-interface DistPoint {
-  rate: string;
-  [run: string]: string | number;
+/** Sequential teal ramp, light → dark as the set-point rate rises. */
+const RATE_COLORS = ["#BFD6D2", "#8DB6B0", "#5E9C95", "#2F6F68", "#143F3B"];
+const RATE_SHORT = ["Very low", "Low", "Medium", "High", "Very high"];
+
+/**
+ * Whether an action requested maintenance. Covers the factored
+ * "{rate}_maint_now" / "{rate}_no_maint" naming and legacy "{rate}+maint".
+ * Returns null for naming schemes with no maintenance flag (e.g. "high_t75").
+ */
+function maintFlag(actionName: string): boolean | null {
+  if (actionName.endsWith("_maint_now") || actionName.endsWith("+maint")) return true;
+  if (actionName.endsWith("_no_maint")) return false;
+  return null;
 }
 
-export function PolicyChart({ experimentId }: { experimentId: number }) {
-  const [data, setData] = useState<DistPoint[]>([]);
-  const [runs, setRuns] = useState<Run[]>([]);
+interface RunPolicy {
+  run: Run;
+  /** Share (0–100) of last-half episodes per RATE_ORDER group. */
+  shares: number[];
+  /** Share (0–100) of last-half episodes that requested maintenance, or null if the action set has no maintenance flag. */
+  maintShare: number | null;
+}
+
+export function PolicyChart({ experimentId, className }: { experimentId: number; className?: string }) {
+  const [policies, setPolicies] = useState<RunPolicy[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      setLoading(true);
       const exp = await fetchExperiment(experimentId);
       const expRuns: Run[] = exp.runs ?? [];
-      if (expRuns.length === 0) return;
 
-      const distributions: Record<string, Record<string, number>> = {};
-
-      await Promise.all(
-        expRuns.map(async (run) => {
+      const result = await Promise.all(
+        expRuns.map(async (run): Promise<RunPolicy> => {
           const episodes: Episode[] = await fetchEpisodes(run.id);
           // Last 50% of episodes
-          const cutoff = Math.floor(episodes.length * 0.5);
-          const tail = episodes.slice(cutoff);
+          const tail = episodes.slice(Math.floor(episodes.length * 0.5));
+          const total = tail.length || 1;
 
           // Count by rate group (merge maint/no-maint)
-          const counts: Record<string, number> = {};
+          const counts = RATE_ORDER.map(() => 0);
+          let maintKnown = 0;
+          let maintYes = 0;
           for (const ep of tail) {
-            const group = rateGroup(ep.action_name);
-            counts[group] = (counts[group] ?? 0) + 1;
+            const idx = RATE_ORDER.indexOf(rateGroup(ep.action_name));
+            if (idx >= 0) counts[idx]++;
+            const flag = maintFlag(ep.action_name);
+            if (flag !== null) {
+              maintKnown++;
+              if (flag) maintYes++;
+            }
           }
-          const total = tail.length || 1;
-          for (const [k, v] of Object.entries(counts)) {
-            counts[k] = Math.round((v / total) * 100);
-          }
-          distributions[runKey(run)] = counts;
+          return {
+            run,
+            shares: counts.map((c) => (c / total) * 100),
+            maintShare: maintKnown > 0 ? (maintYes / maintKnown) * 100 : null,
+          };
         }),
       );
 
       if (cancelled) return;
-
-      const points: DistPoint[] = RATE_ORDER.map((rate) => {
-        const point: DistPoint = { rate };
-        for (const run of expRuns) {
-          point[runKey(run)] = distributions[runKey(run)]?.[rate] ?? 0;
-        }
-        return point;
-      });
-
-      setRuns(expRuns);
-      setData(points);
+      setPolicies(result);
+      setLoading(false);
     })();
     return () => { cancelled = true; };
   }, [experimentId]);
 
-  if (data.length === 0) return null;
-
   return (
-    <section className="rounded-2xl bg-gray-900 p-6">
-      <h2 className="mb-2 text-lg font-semibold text-gray-100">
-        Policy Distribution <span className="text-sm font-normal text-gray-400">(last 50% episodes, grouped by setpoint rate)</span>
-      </h2>
-      <RunLegend runs={runs} />
-      <ResponsiveContainer width="100%" height={360}>
-        <BarChart data={data} margin={{ top: 5, right: 20, bottom: 25, left: 10 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
-          <XAxis
-            dataKey="rate"
-            stroke="#9CA3AF"
-            tick={{ fontSize: 12 }}
-          />
-          <YAxis
-            stroke="#9CA3AF"
-            label={{ value: "%", angle: -90, position: "insideLeft", fill: "#9CA3AF" }}
-          />
-          <Tooltip
-            contentStyle={{ backgroundColor: "#1F2937", border: "1px solid #374151", borderRadius: 8 }}
-            labelStyle={{ color: "#D1D5DB" }}
-            formatter={(value: number) => Number(value.toFixed(2))}
-          />
-          {runs.map((run) => (
-            <Bar
-              key={runKey(run)}
-              dataKey={runKey(run)}
-              name={runLabel(run)}
-              fill={runColor(run)}
-              radius={[4, 4, 0, 0]}
-            />
-          ))}
-        </BarChart>
-      </ResponsiveContainer>
-    </section>
+    <Card className={className} title="Policy mix" subtitle="last 50% of episodes">
+      {loading ? (
+        <CardMessage>Loading episodes…</CardMessage>
+      ) : policies.length === 0 ? (
+        <CardMessage>No runs in this experiment.</CardMessage>
+      ) : (
+        <>
+          <ul className="flex flex-col gap-4">
+            {policies.map(({ run, shares, maintShare }) => (
+              <li key={runKey(run)} className="flex flex-col gap-1.5">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="flex items-center gap-2 text-[13px] font-semibold text-ink">
+                    <Swatch color={runColor(run)} />
+                    {runLabel(run)}
+                  </span>
+                  {maintShare !== null && (
+                    <span className="text-xs text-ink-2">
+                      maintains in{" "}
+                      <b className="tabular font-mono font-semibold text-ink">{maintShare.toFixed(0)}%</b>
+                    </span>
+                  )}
+                </div>
+                <div
+                  className="flex h-[18px] gap-px overflow-hidden rounded bg-surface"
+                  role="img"
+                  aria-label={RATE_SHORT.map((r, i) => `${r} ${shares[i].toFixed(0)}%`).join(", ")}
+                >
+                  {shares.map((pct, i) =>
+                    pct > 0 ? (
+                      <div
+                        key={i}
+                        title={`${RATE_ORDER[i]}: ${pct.toFixed(1)}%`}
+                        style={{ width: `${pct}%`, backgroundColor: RATE_COLORS[i] }}
+                      />
+                    ) : null,
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-auto flex flex-wrap items-center gap-x-3 gap-y-1.5 pt-1">
+            <span className="text-[11px] text-ink-3">Rate set-point:</span>
+            {RATE_SHORT.map((label, i) => (
+              <span key={label} className="inline-flex items-center gap-1.5 text-[11px] text-ink-2">
+                <Swatch color={RATE_COLORS[i]} />
+                {label}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+    </Card>
   );
 }

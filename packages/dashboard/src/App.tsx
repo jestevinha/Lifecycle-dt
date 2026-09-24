@@ -5,31 +5,22 @@ import { PolicyChart } from "./panels/PolicyChart";
 import { MaintenanceWearChart } from "./panels/MaintenanceWearChart";
 import { HeadlessSimulation } from "./panels/HeadlessSimulation";
 import { PlantVisualExperiment } from "./panels/PlantVisualExperiment";
-import { PlantVisualPanel } from "./panels/PlantVisualPanel";
+import { RunComparison } from "./panels/RunComparison";
+import { LiveRun } from "./panels/LiveRun";
+import type { RunProgress } from "./panels/LiveRun";
 import {
   fetchExperiments,
   fetchExperiment,
-  fetchEpisodes,
   createExperiment,
   deleteExperiment,
   startExperimentSSE,
   exportCsvUrl,
-  runLabel,
-  runColor,
+  AGENT_LABELS,
 } from "./api";
 import type { Experiment, ExperimentDetail, ProgressEvent, SimKpiStep, StepEvent, RewardProfile } from "./api";
+import { Chip, SectionLabel, StatusPill, btnDanger, btnPrimary, btnSecondary, inputClass } from "./ui";
 
 const AGENT_TYPES = ["mab", "linucb", "qlearning"] as const;
-const AGENT_LABELS: Record<string, string> = {
-  mab: "MAB",
-  linucb: "LinUCB",
-  qlearning: "Q-Learning",
-};
-const AGENT_COLORS: Record<string, string> = {
-  mab: "#0D9488",
-  linucb: "#7C3AED",
-  qlearning: "#E11D48",
-};
 
 /**
  * Reward mode picked in the run modal. "balanced"/"production"/"efficiency" run
@@ -145,12 +136,56 @@ const AGENT_DEFAULTS: Record<string, Record<string, number>> = {
 // the run as lockstep-wear degenerate; 0.2 matches the seed-diagnostic probes.
 const DEFAULT_WEAR_RATE_SPREAD = 0.2;
 
-interface RunProgress {
-  episode: number;
-  totalEpisodes: number;
+type Tab = "experiments" | "live" | "simulation";
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "experiments", label: "Experiments" },
+  { id: "live", label: "Live run" },
+  { id: "simulation", label: "Headless simulation" },
+];
+
+const PROFILE_NAMES: Record<RewardProfile, string> = {
+  balanced: "balanced",
+  production: "production",
+  efficiency: "efficiency",
+};
+
+/** Human-readable config chips for the experiment title row. Tolerates old/partial config_json. */
+function configChips(detail: ExperimentDetail): string[] {
+  let cfg: Record<string, unknown> = {};
+  try { cfg = JSON.parse(detail.config_json) ?? {}; } catch { /* old rows may be malformed */ }
+  const chips: string[] = [];
+  const num = (v: unknown) => (typeof v === "number" ? v : null);
+  const episodes = num(cfg.totalEpisodes);
+  const steps = num(cfg.simSteps);
+  const seed = num(cfg.simSeed);
+  const spread = num(cfg.wearRateSpread);
+  if (episodes != null) chips.push(`${episodes.toLocaleString()} episodes`);
+  if (steps != null) chips.push(`${steps.toLocaleString()} steps / episode`);
+  if (seed != null) chips.push(`Seed ${seed}`);
+  chips.push(cfg.interactive ? "Interactive" : "Batch");
+  if (cfg.perWorkareaMode) chips.push("Per-workarea mode");
+  if (spread != null) chips.push(`Wear spread ${spread}`);
+  return chips;
 }
 
-type Tab = "experiments" | "simulation";
+function formatDate(iso: string): string {
+  const d = new Date(iso.replace(" ", "T"));
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}
+
+function Logo() {
+  return (
+    <svg width="28" height="28" viewBox="0 0 28 28" aria-hidden="true">
+      <rect x="1" y="1" width="26" height="26" rx="6" fill="#0B4F5C" />
+      <rect x="7" y="7" width="6" height="6" rx="1" fill="#fff" />
+      <rect x="15" y="7" width="6" height="6" rx="1" fill="#fff" opacity="0.55" />
+      <rect x="7" y="15" width="6" height="6" rx="1" fill="#fff" opacity="0.55" />
+      <rect x="15" y="15" width="6" height="6" rx="1" fill="#fff" />
+    </svg>
+  );
+}
 
 export function App() {
   const [tab, setTab] = useState<Tab>("experiments");
@@ -161,7 +196,6 @@ export function App() {
   const [progress, setProgress] = useState<Record<string, RunProgress>>({});
   const [refreshKey, setRefreshKey] = useState(0);
   const [detail, setDetail] = useState<ExperimentDetail | null>(null);
-  const [meanRewardLastHalf, setMeanRewardLastHalf] = useState<Record<number, number>>({});
   const esRef = useRef<EventSource | null>(null);
 
   // Live plant visual state
@@ -187,27 +221,6 @@ export function App() {
     fetchExperiment(experimentId).then((d) => { if (!cancelled) setDetail(d); });
     return () => { cancelled = true; };
   }, [experimentId, refreshKey]);
-
-  // Compute mean reward over the last 50% of episodes, per run
-  useEffect(() => {
-    if (!detail) { setMeanRewardLastHalf({}); return; }
-    let cancelled = false;
-    (async () => {
-      const entries = await Promise.all(
-        detail.runs.map(async (run) => {
-          const episodes = await fetchEpisodes(run.id);
-          const start = Math.floor(episodes.length / 2);
-          const lastHalf = episodes.slice(start);
-          const mean = lastHalf.length > 0
-            ? lastHalf.reduce((sum, e) => sum + e.reward, 0) / lastHalf.length
-            : NaN;
-          return [run.id, mean] as const;
-        }),
-      );
-      if (!cancelled) setMeanRewardLastHalf(Object.fromEntries(entries));
-    })();
-    return () => { cancelled = true; };
-  }, [detail]);
 
   // Clean up SSE on unmount
   useEffect(() => {
@@ -267,11 +280,13 @@ export function App() {
 
     setExperimentId(id);
     setRunning(true);
+    setTab("live");
     setProgress({});
     setLiveSteps([]);
     setLiveAgent("");
     setLiveEpisode(0);
     liveEpisodeRef.current = { agent: "", episode: -1 };
+    loadExperiments();
 
     esRef.current?.close();
     esRef.current = startExperimentSSE(
@@ -287,6 +302,7 @@ export function App() {
       },
       () => {
         setRunning(false);
+        setTab((t) => (t === "live" ? "experiments" : t));
         setRefreshKey((k) => k + 1);
         loadExperiments();
       },
@@ -305,230 +321,164 @@ export function App() {
     );
   };
 
+  const profiles = detail
+    ? [...new Set(detail.runs.map((r) => PROFILE_NAMES[r.reward_profile ?? "balanced"]))]
+    : [];
+
   return (
-    <div className="mx-auto max-w-7xl px-4 py-8 font-sans">
-      {/* Header */}
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
-        <h1 className="text-2xl font-bold text-white">
-          Digital Twin &mdash; RL Dashboard
-        </h1>
-      </div>
+    <div className="min-h-screen">
+      {/* ── Header ── */}
+      <header className="sticky top-0 z-40 border-b border-line bg-surface/95 backdrop-blur">
+        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-x-10 gap-y-2 px-4 py-2 sm:px-8 lg:h-16 lg:py-0">
+          <div className="flex items-center gap-2.5">
+            <Logo />
+            <div className="flex flex-col leading-tight">
+              <span className="text-[15px] font-bold tracking-tight text-ink">Lifecycle DT</span>
+              <span className="text-xs text-ink-3">Plant supervision · RL maintenance</span>
+            </div>
+          </div>
 
-      {/* Tabs */}
-      <div className="mb-6 flex items-center gap-6 border-b border-gray-700">
-        <button
-          className={`pb-2 text-sm font-medium transition-colors ${
-            tab === "experiments"
-              ? "border-b-2 border-teal-500 text-teal-400"
-              : "text-gray-400 hover:text-gray-200"
-          }`}
-          onClick={() => setTab("experiments")}
-        >
-          RL Experiments
-        </button>
-        <button
-          className={`pb-2 text-sm font-medium transition-colors ${
-            tab === "simulation"
-              ? "border-b-2 border-teal-500 text-teal-400"
-              : "text-gray-400 hover:text-gray-200"
-          }`}
-          onClick={() => setTab("simulation")}
-        >
-          Headless Simulation
-        </button>
-      </div>
-
-      {tab === "experiments" && (
-        <div className="mb-8 flex flex-wrap items-center gap-3">
-          {/* Experiment Selector */}
-          <select
-            className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 focus:border-teal-500 focus:outline-none"
-            value={experimentId ?? ""}
-            onChange={(e) => {
-              const v = e.target.value;
-              setExperimentId(v ? Number(v) : null);
-              setRefreshKey((k) => k + 1);
-            }}
-          >
-            <option value="">Select experiment...</option>
-            {experiments.map((exp) => (
-              <option key={exp.id} value={exp.id}>
-                #{exp.id} &mdash; {exp.status} ({exp.created_at.slice(0, 16)})
-              </option>
+          <nav aria-label="Sections" className="order-last flex w-full gap-6 lg:order-none lg:w-auto lg:flex-1 lg:gap-7">
+            {TABS.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                aria-current={tab === t.id ? "page" : undefined}
+                onClick={() => setTab(t.id)}
+                className={`relative flex h-11 items-center gap-2 border-b-2 text-sm transition-colors lg:h-16 ${
+                  tab === t.id
+                    ? "border-accent font-semibold text-ink"
+                    : "border-transparent font-medium text-ink-3 hover:text-ink"
+                }`}
+              >
+                {t.label}
+                {t.id === "live" && running && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-warn" aria-label="running" />}
+              </button>
             ))}
-          </select>
+          </nav>
 
-          {/* Run New Experiment */}
-          <button
-            className="rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-500 disabled:opacity-50"
-            onClick={() => setShowModal(true)}
-            disabled={running}
-          >
-            Run New Experiment
-          </button>
-
-          {/* Export CSV */}
-          {experimentId && !running && (
-            <a
-              href={exportCsvUrl(experimentId)}
-              download
-              className="rounded-lg border border-gray-600 px-4 py-2 text-sm text-gray-300 hover:border-gray-400 hover:text-white"
-            >
-              Export CSV
-            </a>
-          )}
-
-          {/* Delete Experiment */}
-          {experimentId && !running && (
-            <button
-              className="rounded-lg border border-red-800 px-4 py-2 text-sm text-red-400 hover:border-red-600 hover:bg-red-900/30 hover:text-red-300"
-              onClick={() => handleDelete(experimentId)}
-            >
-              Delete
+          <div className="flex w-full items-center gap-2.5 sm:ml-auto sm:w-auto">
+            {tab !== "simulation" && (
+              <>
+                <label htmlFor="experiment-select" className="hidden text-xs text-ink-3 md:block">Experiment</label>
+                <select
+                  id="experiment-select"
+                  className={`${inputClass} min-w-0 flex-1 sm:w-[240px] sm:flex-none`}
+                  value={experimentId ?? ""}
+                  disabled={running}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setExperimentId(v ? Number(v) : null);
+                    setRefreshKey((k) => k + 1);
+                    setTab("experiments");
+                  }}
+                >
+                  <option value="">Select experiment…</option>
+                  {experiments.map((exp) => (
+                    <option key={exp.id} value={exp.id}>
+                      #{exp.id} · {exp.status} · {exp.created_at.slice(0, 16)}
+                    </option>
+                  ))}
+                </select>
+              </>
+            )}
+            <button type="button" className={`${btnPrimary} shrink-0`} onClick={() => setShowModal(true)} disabled={running}>
+              Run experiment
             </button>
-          )}
+          </div>
         </div>
-      )}
+      </header>
 
-      {/* ── Experiments Tab ── */}
-      {tab === "experiments" && (
-        <>
-          {/* Live Plant Visual + Progress */}
-          {running && (
-            <div className="mb-8 space-y-4">
-              {/* Live plant floor */}
-              {liveSteps.length > 0 && (
-                <PlantVisualPanel
-                  kpiData={liveSteps}
-                  agentName={liveAgent}
-                  episode={liveEpisode}
-                  live
-                />
-              )}
+      <main className="mx-auto flex max-w-[1600px] flex-col gap-5 px-4 py-6 sm:px-8">
+        {/* ── Experiments ── */}
+        {tab === "experiments" && (
+          <>
+            {running && (
+              <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-warn/30 bg-warn-soft px-5 py-3 text-sm text-ink-2">
+                <span>
+                  <b className="text-ink">Experiment #{experimentId}</b> is running — results appear here when it finishes.
+                </span>
+                <button type="button" className={btnSecondary} onClick={() => setTab("live")}>View live run</button>
+              </div>
+            )}
 
-              {/* Compact progress bars */}
-              <div className="rounded-2xl bg-gray-900 p-4">
-                <div className="mb-2 flex items-center gap-3">
-                  <h2 className="text-sm font-semibold text-gray-100">Progress</h2>
-                  {liveAgent && (
-                    <span className="text-xs text-gray-400">
-                      {AGENT_LABELS[liveAgent] ?? liveAgent} &middot; Episode {liveEpisode + 1} &middot; Step {liveSteps.length}
+            {detail && !running && (
+              <>
+                <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
+                  <div className="flex flex-col gap-1.5">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <h1 className="text-[26px] font-bold tracking-tight text-ink">Experiment #{detail.id}</h1>
+                      <StatusPill status={detail.status} />
+                    </div>
+                    <span className="text-[13px] text-ink-2">
+                      Started {formatDate(detail.created_at)} · {detail.runs.length} run{detail.runs.length === 1 ? "" : "s"}
+                      {profiles.length > 0 && ` · ${profiles.join(" + ")} reward`}
                     </span>
-                  )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <a href={exportCsvUrl(detail.id)} download className={btnSecondary}>Export CSV</a>
+                    <button type="button" className={btnDanger} onClick={() => handleDelete(detail.id)}>Delete</button>
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  {Object.entries(progress).map(([agent, p]) => {
-                    const pct = p.totalEpisodes > 0 ? (p.episode / p.totalEpisodes) * 100 : 0;
-                    return (
-                      <div key={agent}>
-                        <div className="mb-1 flex justify-between text-xs">
-                          <span className="font-medium" style={{ color: AGENT_COLORS[agent] }}>
-                            {AGENT_LABELS[agent] ?? agent}
-                          </span>
-                          <span className="text-gray-400">
-                            {p.episode}/{p.totalEpisodes}
-                          </span>
-                        </div>
-                        <div className="h-1.5 overflow-hidden rounded-full bg-gray-700">
-                          <div
-                            className="h-full rounded-full transition-all duration-200"
-                            style={{
-                              width: `${pct}%`,
-                              backgroundColor: AGENT_COLORS[agent] ?? "#888",
-                            }}
-                          />
-                        </div>
-                      </div>
-                    );
-                  })}
-                  {Object.keys(progress).length === 0 && (
-                    <p className="text-xs text-gray-400">Waiting for first progress event...</p>
-                  )}
+                <div className="-mt-1 flex flex-wrap gap-2">
+                  {configChips(detail).map((c) => <Chip key={c}>{c}</Chip>)}
                 </div>
-              </div>
-            </div>
-          )}
 
-          {/* Summary Stats */}
-          {detail && !running && (
+                {/* 12-column dashboard grid: panels sit side by side on wide screens, stack on narrow ones */}
+                <div className="grid grid-cols-12 gap-5" key={refreshKey}>
+                  <RunComparison runs={detail.runs} className="col-span-12 xl:col-span-5" />
+                  <LearningCurves experimentId={detail.id} className="col-span-12 xl:col-span-7" />
+
+                  <KpiTimeline experimentId={detail.id} />
+
+                  <SectionLabel title="Plant & policy" detail="what the agents chose and how the floor responded" />
+                  <PlantVisualExperiment experimentId={detail.id} className="col-span-12 lg:col-span-7" />
+                  <div className="col-span-12 flex min-w-0 flex-col gap-5 lg:col-span-5">
+                    <PolicyChart experimentId={detail.id} />
+                    <MaintenanceWearChart experimentId={detail.id} className="flex-1" />
+                  </div>
+                </div>
+              </>
+            )}
+
+            {!detail && !running && (
+              <div className="flex flex-col items-center gap-4 rounded-xl border border-line bg-surface px-6 py-16 text-center">
+                <p className="text-sm text-ink-2">Select an experiment or run a new one to see results.</p>
+                <button type="button" className={btnPrimary} onClick={() => setShowModal(true)}>Run experiment</button>
+              </div>
+            )}
+          </>
+        )}
+
+        {/* ── Live run ── */}
+        {tab === "live" && (
+          running ? (
             <>
-              <div className="mb-4 grid grid-cols-3 gap-4">
-                <StatCard label="Experiment" value={`#${detail.id}`} />
-                <StatCard label="Date" value={detail.created_at.slice(0, 10)} />
-                <StatCard
-                  label="Total Episodes"
-                  value={String(Math.max(...detail.runs.map((r) => r.total_episodes), 0))}
-                />
+              <div className="flex flex-col gap-1.5">
+                <div className="flex flex-wrap items-center gap-3">
+                  <h1 className="text-[26px] font-bold tracking-tight text-ink">Experiment #{experimentId}</h1>
+                  <StatusPill status="running" />
+                </div>
+                <span className="text-[13px] text-ink-2">
+                  {liveAgent
+                    ? <>Now streaming: <b className="text-ink">{AGENT_LABELS[liveAgent] ?? liveAgent}</b> · episode {liveEpisode + 1}</>
+                    : "Starting…"}
+                </span>
               </div>
-
-              {/* Per-run reward table — a grid of StatCards doesn't scale once
-                  an experiment has more than a couple of runs (e.g. 3 agents ×
-                  2 reward profiles = 6 runs, 12 reward cards): labels wrap and
-                  cards overflow their grid cell. A table scales to any number
-                  of runs without wrapping. */}
-              <div className="mb-6 overflow-x-auto rounded-2xl bg-gray-900 p-4">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-left text-xs text-gray-400">
-                      <th className="pb-2 pr-4 font-medium">Run</th>
-                      <th className="pb-2 pr-4 font-medium">Best Reward</th>
-                      <th className="pb-2 font-medium">Mean Reward (last 50%)</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detail.runs.map((run) => {
-                      const mean = meanRewardLastHalf[run.id];
-                      return (
-                        <tr key={run.id} className="border-t border-gray-800">
-                          <td className="py-2 pr-4">
-                            <span className="flex items-center gap-2">
-                              <span
-                                className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
-                                style={{ backgroundColor: runColor(run) }}
-                              />
-                              <span className="text-gray-200">{runLabel(run)}</span>
-                            </span>
-                          </td>
-                          <td className="py-2 pr-4 font-medium" style={{ color: runColor(run) }}>
-                            {run.final_reward != null ? run.final_reward.toFixed(2) : "—"}
-                          </td>
-                          <td className="py-2 font-medium" style={{ color: runColor(run) }}>
-                            {mean != null && !Number.isNaN(mean) ? mean.toFixed(2) : "—"}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
+              <LiveRun steps={liveSteps} agent={liveAgent} episode={liveEpisode} progress={progress} />
             </>
-          )}
-
-          {/* Panels */}
-          {experimentId != null && !running ? (
-            <div className="grid gap-6" key={refreshKey}>
-              <PlantVisualExperiment experimentId={experimentId} />
-              <LearningCurves experimentId={experimentId} />
-              <KpiTimeline experimentId={experimentId} />
-              <PolicyChart experimentId={experimentId} />
-              <MaintenanceWearChart experimentId={experimentId} />
-            </div>
           ) : (
-            !running && (
-              <div className="rounded-2xl bg-gray-900 p-12 text-center">
-                <p className="text-gray-400">
-                  Select an experiment or run a new one to see results.
-                </p>
-              </div>
-            )
-          )}
-        </>
-      )}
+            <div className="flex flex-col items-center gap-4 rounded-xl border border-line bg-surface px-6 py-16 text-center">
+              <p className="text-sm text-ink-2">No experiment is running. Start one to watch the plant floor live.</p>
+              <button type="button" className={btnPrimary} onClick={() => setShowModal(true)}>Run experiment</button>
+            </div>
+          )
+        )}
 
-      {/* ── Headless Simulation Tab ── */}
-      {tab === "simulation" && <HeadlessSimulation />}
+        {/* ── Headless Simulation ── */}
+        {tab === "simulation" && <HeadlessSimulation />}
+      </main>
 
-      {/* Modal */}
       {showModal && <RunModal onClose={() => setShowModal(false)} onSubmit={handleRun} />}
     </div>
   );
@@ -598,58 +548,64 @@ function RunModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 p-4" onClick={onClose}>
       <form
-        className="w-full max-w-md rounded-2xl bg-gray-900 p-6 shadow-xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="run-modal-title"
+        className="max-h-full w-full max-w-lg overflow-y-auto rounded-xl border border-line bg-surface p-6 shadow-xl"
         onClick={(e) => e.stopPropagation()}
         onSubmit={handleSubmit}
       >
-        <h2 className="mb-5 text-lg font-semibold text-white">New Experiment</h2>
+        <h2 id="run-modal-title" className="mb-5 text-lg font-semibold text-ink">New experiment</h2>
 
         <div className="space-y-4">
-          <Field label="Sim Steps" value={simSteps} onChange={setSimSteps} />
-          <Field label="Sim Seed" value={simSeed} onChange={setSimSeed} />
-          <Field label="Total Episodes" value={totalEpisodes} onChange={setTotalEpisodes} />
-          <Field
-            label="Wear Rate Spread (0–1, nonzero)"
-            value={wearRateSpread}
-            onChange={setWearRateSpread}
-            step={0.05}
-          />
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="Sim steps" value={simSteps} onChange={setSimSteps} />
+            <Field label="Sim seed" value={simSeed} onChange={setSimSeed} />
+            <Field label="Total episodes" value={totalEpisodes} onChange={setTotalEpisodes} />
+            <Field
+              label="Wear rate spread (0–1, nonzero)"
+              value={wearRateSpread}
+              onChange={setWearRateSpread}
+              step={0.05}
+            />
+          </div>
 
-          <label className="flex items-center gap-3 text-sm text-gray-200">
+          <label className="flex items-center gap-3 text-sm text-ink">
             <input
               type="checkbox"
               checked={interactive}
               onChange={(e) => setInteractive(e.target.checked)}
-              className="rounded border-gray-600 bg-gray-800 accent-teal-500"
+              className="h-4 w-4 accent-[#0B4F5C]"
             />
             <span>
               Interactive mode
-              <span className="ml-1 text-xs text-gray-400">(step-level agent control)</span>
+              <span className="ml-1 text-xs text-ink-3">(step-level agent control)</span>
             </span>
           </label>
 
-          <label className={`flex items-center gap-3 text-sm ${interactive ? "text-gray-200" : "text-gray-500"}`}>
+          <label className={`flex items-center gap-3 text-sm ${interactive ? "text-ink" : "text-ink-3"}`}>
             <input
               type="checkbox"
               checked={perWorkareaMode}
               disabled={!interactive}
               onChange={(e) => setPerWorkareaMode(e.target.checked)}
-              className="rounded border-gray-600 bg-gray-800 accent-teal-500 disabled:opacity-50"
+              className="h-4 w-4 accent-[#0B4F5C] disabled:opacity-50"
             />
             <span>
               Per-workarea rate control
-              <span className="ml-1 text-xs text-gray-400">
+              <span className="ml-1 text-xs text-ink-3">
                 (16 decisions/shift, one per workarea{!interactive ? " — requires interactive mode" : ""})
               </span>
             </span>
           </label>
 
           <div>
-            <label className="mb-2 block text-sm font-medium text-gray-300">Reward Goal</label>
+            <label htmlFor="reward-goal" className="mb-1.5 block text-sm font-medium text-ink-2">Reward goal</label>
             <select
-              className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 focus:border-teal-500 focus:outline-none"
+              id="reward-goal"
+              className={`${inputClass} w-full`}
               value={rewardMode}
               onChange={(e) => setRewardMode(e.target.value as RewardMode)}
             >
@@ -658,59 +614,43 @@ function RunModal({
               <option value="efficiency">Efficiency-focused (favor low cost/wear)</option>
               <option value="compare">Compare production vs. efficiency (2 runs per agent)</option>
             </select>
-            <p className="mt-1 text-xs text-gray-400">
+            <p className="mt-1.5 text-xs text-ink-3">
               {rewardMode === "compare"
                 ? "Each selected agent runs twice — once optimizing for throughput, once for cost/wear — so you can compare how it adapts its goal."
                 : "Reweights the same reward terms (throughput, cost, wear) toward this goal; accident/failure penalties stay fixed."}
             </p>
           </div>
 
-          <div>
-            <label className="mb-2 block text-sm font-medium text-gray-300">Agents</label>
-            <div className="flex gap-4">
+          <fieldset>
+            <legend className="mb-2 block text-sm font-medium text-ink-2">Agents</legend>
+            <div className="flex flex-wrap gap-2">
               {AGENT_TYPES.map((agent) => (
-                <label key={agent} className="flex items-center gap-2 text-sm text-gray-200">
+                <label
+                  key={agent}
+                  className="flex h-10 cursor-pointer items-center gap-2 rounded-lg border border-line-strong px-3 text-sm text-ink has-[:checked]:border-accent has-[:checked]:bg-accent-soft"
+                >
                   <input
                     type="checkbox"
                     checked={selectedAgents.has(agent)}
                     onChange={() => toggle(agent)}
-                    className="rounded border-gray-600 bg-gray-800 accent-teal-500"
+                    className="h-4 w-4 accent-[#0B4F5C]"
                   />
                   {AGENT_LABELS[agent]}
                 </label>
               ))}
             </div>
-          </div>
+          </fieldset>
         </div>
 
         <div className="mt-6 flex justify-end gap-3">
-          <button
-            type="button"
-            className="rounded-lg border border-gray-600 px-4 py-2 text-sm text-gray-300 hover:border-gray-400"
-            onClick={onClose}
-          >
+          <button type="button" className={btnSecondary} onClick={onClose}>
             Cancel
           </button>
-          <button
-            type="submit"
-            className="rounded-lg bg-teal-600 px-4 py-2 text-sm font-medium text-white hover:bg-teal-500 disabled:opacity-50"
-            disabled={selectedAgents.size === 0}
-          >
-            Start
+          <button type="submit" className={btnPrimary} disabled={selectedAgents.size === 0}>
+            Start experiment
           </button>
         </div>
       </form>
-    </div>
-  );
-}
-
-function StatCard({ label, value, color }: { label: string; value: string; color?: string }) {
-  return (
-    <div className="rounded-xl bg-gray-900 px-4 py-3">
-      <p className="text-xs text-gray-400">{label}</p>
-      <p className="mt-1 text-lg font-semibold" style={color ? { color } : { color: "#F3F4F6" }}>
-        {value}
-      </p>
     </div>
   );
 }
@@ -727,15 +667,15 @@ function Field({
   step?: number;
 }) {
   return (
-    <div>
-      <label className="mb-1 block text-sm font-medium text-gray-300">{label}</label>
+    <label className="flex flex-col gap-1.5">
+      <span className="text-sm font-medium text-ink-2">{label}</span>
       <input
         type="number"
         step={step}
-        className="w-full rounded-lg border border-gray-700 bg-gray-800 px-3 py-2 text-sm text-gray-200 focus:border-teal-500 focus:outline-none"
+        className={`${inputClass} tabular w-full font-mono`}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
       />
-    </div>
+    </label>
   );
 }

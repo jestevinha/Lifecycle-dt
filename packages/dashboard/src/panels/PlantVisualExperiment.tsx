@@ -14,16 +14,17 @@ import {
   kpiStepsToSimSteps,
   hasFullKpiData,
   runLabel,
-  runColor,
 } from "../api";
 import type { Run, Episode, SimKpiStep } from "../api";
 import { PlantVisualPanel } from "./PlantVisualPanel";
+import { Card, CardMessage, selectSmClass } from "../ui";
 
 interface Props {
   experimentId: number;
+  className?: string;
 }
 
-export function PlantVisualExperiment({ experimentId }: Props) {
+export function PlantVisualExperiment({ experimentId, className }: Props) {
   const [runs, setRuns] = useState<Run[]>([]);
   const [episodes, setEpisodes] = useState<Episode[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
@@ -94,130 +95,89 @@ export function PlantVisualExperiment({ experimentId }: Props) {
     return () => { cancelled = true; };
   }, [selectedEpisodeId]);
 
-  if (loading) {
-    return (
-      <section className="rounded-2xl bg-gray-900 p-6">
-        <h2 className="text-lg font-semibold text-gray-100">Plant Visual</h2>
-        <p className="mt-4 text-sm text-gray-400">Loading...</p>
-      </section>
-    );
-  }
-
-  if (runs.length === 0) return null;
-
   const selectedEpisode = episodes.find((e) => e.id === selectedEpisodeId);
+  const best = episodes.length > 0 ? episodes.reduce((a, b) => (a.reward >= b.reward ? a : b)) : undefined;
+  const worst = episodes.length > 0 ? episodes.reduce((a, b) => (a.reward <= b.reward ? a : b)) : undefined;
 
   return (
-    <section className="rounded-2xl bg-gray-900 p-6">
-      <h2 className="mb-4 text-lg font-semibold text-gray-100">
-        Plant Visual{" "}
-        <span className="text-sm font-normal text-gray-400">
-          (episode playback)
-        </span>
-      </h2>
-
-      {/* Controls: agent + episode selector */}
-      <div className="mb-4 flex flex-wrap items-end gap-4">
-        {/* Agent selector */}
-        <div>
-          <label className="mb-1 block text-xs text-gray-400">Agent</label>
-          <div className="flex gap-2">
-            {runs.map((run) => (
-              <button
-                key={run.id}
-                onClick={() => setSelectedRunId(run.id)}
-                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                  selectedRunId === run.id
-                    ? "text-white"
-                    : "bg-gray-800 text-gray-400 hover:text-gray-200"
-                }`}
-                style={
-                  selectedRunId === run.id
-                    ? { backgroundColor: runColor(run) }
-                    : undefined
-                }
-              >
-                {runLabel(run)}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Episode selector */}
-        {episodes.length > 0 && (
-          <div>
-            <label className="mb-1 block text-xs text-gray-400">Episode</label>
+    <Card
+      className={className}
+      title="Plant floor"
+      subtitle="episode playback"
+      actions={
+        runs.length > 0 && (
+          <>
             <select
-              className="rounded-lg border border-gray-700 bg-gray-800 px-3 py-1.5 text-sm text-gray-200 focus:border-teal-500 focus:outline-none"
-              value={selectedEpisodeId ?? ""}
-              onChange={(e) => setSelectedEpisodeId(Number(e.target.value))}
+              aria-label="Run shown on plant floor"
+              className={selectSmClass}
+              value={selectedRunId ?? ""}
+              onChange={(e) => setSelectedRunId(Number(e.target.value))}
             >
-              {episodes.map((ep) => {
-                const best = episodes.reduce((a, b) => (a.reward >= b.reward ? a : b));
-                const worst = episodes.reduce((a, b) => (a.reward <= b.reward ? a : b));
-                let tag = "";
-                if (ep.id === best.id) tag = " (best)";
-                else if (ep.id === worst.id) tag = " (worst)";
-                else if (ep.episode_num === 0) tag = " (first)";
-                else if (ep.episode_num === episodes.length - 1) tag = " (last)";
-                return (
-                  <option key={ep.id} value={ep.id}>
-                    Ep {ep.episode_num} — R:{ep.reward.toFixed(2)} {ep.action_name}{tag}
-                  </option>
-                );
-              })}
+              {runs.map((run) => (
+                <option key={run.id} value={run.id}>{runLabel(run)}</option>
+              ))}
             </select>
-          </div>
-        )}
-
-        {/* Episode info */}
-        {selectedEpisode && (
-          <div className="flex gap-4 text-xs text-gray-500">
-            <span>
-              Reward:{" "}
-              <span className="text-gray-300">
-                {selectedEpisode.reward.toFixed(3)}
-              </span>
-            </span>
-            <span>
-              Action:{" "}
-              <span className="text-gray-300">
-                {selectedEpisode.action_name}
-              </span>
-            </span>
-            <span>
-              Accidents:{" "}
-              <span className="text-gray-300">
-                {selectedEpisode.total_accidents}
-              </span>
-            </span>
-          </div>
-        )}
-      </div>
-
-      {/* Incomplete data warning */}
-      {incompleteData && (
-        <div className="mb-3 rounded-lg border border-amber-800 bg-amber-900/20 px-4 py-2 text-sm text-amber-300">
-          This experiment was run before the plant visual was added. Production, energy, power, temperature, and clock data are unavailable.
-          Re-run the experiment to get full plant visual data.
-        </div>
-      )}
-
-      {/* Plant visual */}
-      {kpiData && kpiData.length > 0 ? (
-        <PlantVisualPanel
-          kpiData={kpiData}
-          agentName={selectedRun?.agent_type}
-          episode={selectedEpisode?.episode_num}
-        />
+            {episodes.length > 0 && (
+              <select
+                aria-label="Episode"
+                className={`${selectSmClass} max-w-[190px]`}
+                value={selectedEpisodeId ?? ""}
+                onChange={(e) => setSelectedEpisodeId(Number(e.target.value))}
+              >
+                {episodes.map((ep) => {
+                  let tag = "";
+                  if (ep.id === best?.id) tag = " (best)";
+                  else if (ep.id === worst?.id) tag = " (worst)";
+                  else if (ep.episode_num === 0) tag = " (first)";
+                  else if (ep.episode_num === episodes.length - 1) tag = " (last)";
+                  return (
+                    <option key={ep.id} value={ep.id}>
+                      Ep {ep.episode_num}{tag} — R {ep.reward.toFixed(1)}
+                    </option>
+                  );
+                })}
+              </select>
+            )}
+          </>
+        )
+      }
+    >
+      {loading ? (
+        <CardMessage>Loading…</CardMessage>
+      ) : runs.length === 0 ? (
+        <CardMessage>No runs in this experiment.</CardMessage>
       ) : (
-        <div className="rounded-xl bg-gray-800/50 p-8 text-center">
-          <p className="text-sm text-gray-400">
-            No KPI step data available for this episode.
-            {" "}KPI steps are stored for first, last, best, and worst episodes only.
-          </p>
-        </div>
+        <>
+          {selectedEpisode && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-3">
+              <span>Reward <b className="tabular font-mono text-ink">{selectedEpisode.reward.toFixed(2)}</b></span>
+              <span>Action <b className="font-mono text-ink">{selectedEpisode.action_name}</b></span>
+              <span>Accidents <b className="tabular font-mono text-ink">{selectedEpisode.total_accidents}</b></span>
+            </div>
+          )}
+
+          {incompleteData && (
+            <div className="rounded-lg border border-warn/30 bg-warn-soft px-3 py-2 text-xs text-warn">
+              This experiment predates the plant visual: production, energy, power, temperature and clock
+              data are unavailable. Re-run it to get full plant data.
+            </div>
+          )}
+
+          {kpiData && kpiData.length > 0 ? (
+            <PlantVisualPanel
+              kpiData={kpiData}
+              agentName={selectedRun?.agent_type}
+              episode={selectedEpisode?.episode_num}
+              compact
+            />
+          ) : (
+            <CardMessage>
+              No step data for this episode. KPI steps are stored for the first, last, best and worst
+              episodes only.
+            </CardMessage>
+          )}
+        </>
       )}
-    </section>
+    </Card>
   );
 }
